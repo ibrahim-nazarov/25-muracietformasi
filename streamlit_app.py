@@ -190,22 +190,35 @@ def apply_form(student, season):
         st.info(f"Bu ixtisas üçün {season_label(season)} semestrində müraciət edilə biləcək fənn yoxdur.")
         return
 
+    keys = list(by_key)
+
+    def label(k):
+        s = by_key[k]
+        return f"{s['subject']} · {s['semester']} · {s['credits']} kredit"
+
     st.caption(
         f"Açıq semestr: {season_label(season)} · "
-        f"Qalan müraciət hüququ: {remaining} fən"
+        f"Qalan müraciət hüququ: {remaining} fən. "
+        "Ən azı 1 fənn seçməlisiniz, ikinci fənn istəyə bağlıdır."
     )
 
     with st.form("apply_form"):
-        chosen_keys = st.multiselect(
-            f"Fənnlər (ən çox {remaining} seçin)",
-            options=list(by_key),
-            format_func=lambda k: (
-                f"{by_key[k]['subject']} · {by_key[k]['semester']} · "
-                f"{by_key[k]['credits']} kredit"
-            ),
-            max_selections=remaining,
+        first = st.selectbox(
+            "1-ci fənn (məcburi)",
+            options=keys,
+            index=None,
+            format_func=label,
             placeholder="Fənn seçin",
         )
+        second = None
+        if remaining >= 2:
+            second = st.selectbox(
+                "2-ci fənn (istəyə bağlı)",
+                options=keys,
+                index=None,
+                format_func=label,
+                placeholder="Yalnız bir fənn istəyirsinizsə boş buraxın",
+            )
         receipt = st.file_uploader(
             "Ödənişin qəbzi (PDF, JPG və ya PNG)",
             type=["pdf", "jpg", "jpeg", "png"],
@@ -216,13 +229,15 @@ def apply_form(student, season):
     if not submitted:
         return
 
-    chosen = [by_key[k] for k in chosen_keys]
+    chosen_keys = [k for k in (first, second) if k is not None]
 
     problems = []
-    if not chosen:
-        problems.append("Ən azı bir fənn seçin.")
-    if len(chosen) > remaining:
-        problems.append(f"Ən çox {remaining} fən seçə bilərsiniz.")
+    if first is None:
+        problems.append("1-ci fənni seçin.")
+    if len(chosen_keys) != len(set(chosen_keys)):
+        problems.append("Eyni fənni iki dəfə seçmək olmaz.")
+    if len(chosen_keys) > remaining:
+        problems.append(f"Ən çox {remaining} fənn seçə bilərsiniz.")
     if receipt is None:
         problems.append("Qəbzi yükləyin.")
     elif receipt.size > MAX_RECEIPT_MB * 1024 * 1024:
@@ -232,6 +247,8 @@ def apply_form(student, season):
         for p in problems:
             st.error(p)
         return
+
+    chosen = [by_key[k] for k in chosen_keys]
 
     now = datetime.now(BAKU)
     ext = Path(receipt.name).suffix.lower()
