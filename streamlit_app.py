@@ -15,6 +15,7 @@ st.set_page_config(page_title="25% ödəniş müraciəti", page_icon="🎓", lay
 
 BAKU = ZoneInfo("Asia/Baku")
 MAX_RECEIPT_MB = 10
+MAX_SUBJECTS = 2
 
 STATUS_RECEIVED = "Müraciətiniz qəbul edildi"
 STATUS_REVIEW = "Müraciətinizə baxılır"
@@ -159,7 +160,23 @@ def apply_form(student, season):
         st.info("Tutorunuz hələ açıq semestr seçməyib. Müraciət hazırda mümkün deyil.")
         return
 
-    st.caption(f"Açıq semestr: {season_label(season)}")
+    active = [
+        a for a in db.list_applications(fin=student["fin"])
+        if a["status"] != STATUS_CANCELLED
+    ]
+    remaining = MAX_SUBJECTS - len(active)
+
+    if remaining <= 0:
+        st.info(
+            f"Siz artıq {MAX_SUBJECTS} fənnə müraciət etmisiniz. "
+            "Yeni müraciət üçün mövcud müraciətlərdən biri ləğv edilməlidir."
+        )
+        return
+
+    st.caption(
+        f"Açıq semestr: {season_label(season)} · "
+        f"Qalan müraciət hüququ: {remaining} fən"
+    )
 
     subjects = [
         s for s in db.list_subjects(student["specialty_code"])
@@ -198,16 +215,15 @@ def apply_form(student, season):
         problems.append("Qəbzi yükləyin.")
     elif receipt.size > MAX_RECEIPT_MB * 1024 * 1024:
         problems.append(f"Fayl {MAX_RECEIPT_MB} MB-dan böyük ola bilməz.")
+    if len(active) >= MAX_SUBJECTS:
+        problems.append(f"Ən çox {MAX_SUBJECTS} fənnə müraciət etmək olar.")
     if idx is not None:
         chosen = subjects[idx]
-        for a in db.list_applications(fin=student["fin"]):
-            if (
-                a["subject"] == chosen["subject"]
-                and a["semester"] == chosen["semester"]
-                and a["status"] != STATUS_CANCELLED
-            ):
-                problems.append("Bu fənn üçün artıq aktiv müraciətiniz var.")
-                break
+        if any(
+            a["subject"] == chosen["subject"] and a["semester"] == chosen["semester"]
+            for a in active
+        ):
+            problems.append("Bu fənn üçün artıq aktiv müraciətiniz var.")
 
     if problems:
         for p in problems:
