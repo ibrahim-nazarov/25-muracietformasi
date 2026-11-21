@@ -1,4 +1,5 @@
 import base64
+import hmac
 import mimetypes
 import re
 from datetime import datetime
@@ -8,7 +9,6 @@ from zoneinfo import ZoneInfo
 import streamlit as st
 import streamlit.components.v1 as components
 
-import auth
 import sheets as db
 
 st.set_page_config(page_title="25% ödəniş müraciəti", page_icon="🎓", layout="wide")
@@ -61,10 +61,13 @@ def safe_filename(text):
     return re.sub(r'[\\/:*?"<>|]+', "", text).strip()
 
 
-def check_tutor_login(email, password):
-    tutor = db.get_tutor(email)
-    if tutor and auth.verify_hash(password, tutor["password_hash"]):
-        return tutor["email"]
+def check_tutor_login(password):
+    password = (password or "").strip()
+    if not password:
+        return None
+    for tutor in db.list_tutors():
+        if hmac.compare_digest(password.encode(), tutor["password"].encode()):
+            return tutor["name"]
     return None
 
 
@@ -88,15 +91,14 @@ def login_page():
 
     with tab_tutor:
         with st.form("tutor_login"):
-            email = st.text_input("Tutor e-poçtu")
-            password = st.text_input("Parol", type="password")
+            password = st.text_input("Tutor parolu", type="password")
             ok = st.form_submit_button("Daxil ol")
         if ok:
-            tutor_email = check_tutor_login(email.strip().lower(), password)
-            if tutor_email:
-                st.session_state.update(role="tutor", tutor_email=tutor_email)
+            name = check_tutor_login(password)
+            if name:
+                st.session_state.update(role="tutor", tutor_name=name)
                 st.rerun()
-            st.error("E-poçt və ya parol yanlışdır.")
+            st.error("Parol yanlışdır.")
 
 
 # ---------- Tələbə ----------
@@ -226,14 +228,14 @@ def my_applications(fin):
 
 # ---------- Tutor ----------
 
-def tutor_page(tutor_email):
+def tutor_page(tutor_name):
     st.title("Tutor paneli")
-    st.caption(f"Tutor: {tutor_email}")
+    st.caption(f"Tutor: {tutor_name}")
 
     mine = []
     for a in db.list_applications():
         student = db.get_student(a["fin"])
-        if student and student["tutor_email"].strip().lower() == tutor_email:
+        if student and student["tutor"] == tutor_name:
             mine.append((a, student))
 
     if not mine:
@@ -351,7 +353,7 @@ def main():
     if st.session_state["role"] == "student":
         student_page(st.session_state["fin"])
     else:
-        tutor_page(st.session_state["tutor_email"])
+        tutor_page(st.session_state["tutor_name"])
 
 
 main()
