@@ -1,254 +1,350 @@
-import os
+import base64
+import hmac
+import mimetypes
+import re
 from datetime import datetime
-import gspread
-from google.oauth2.service_account import Credentials
-import pandas as pd
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
 import streamlit as st
+import streamlit.components.v1 as components
 
-# 1. SƏHİFƏ AYARLARI
-st.set_page_config(page_title="25% İmtahan Müraciəti Portalı", layout="wide")
-st.title("🎓 25% İmtahan Müraciəti Portalı")
+import sheets as db
 
-SHEET_NAME = "25 faizə müraciət"
+st.set_page_config(page_title="25% ödəniş müraciəti", page_icon="🎓", layout="wide")
+
+BAKU = ZoneInfo("Asia/Baku")
+MAX_RECEIPT_MB = 10
+
+STATUS_RECEIVED = "Müraciətiniz qəbul edildi"
+STATUS_REVIEW = "Müraciətinizə baxılır"
+STATUS_APPROVED = "Müraciətiniz təsdiq edildi"
+STATUS_CANCELLED = "Müraciətiniz ləğv edildi"
+STATUSES = [STATUS_RECEIVED, STATUS_REVIEW, STATUS_APPROVED, STATUS_CANCELLED]
+
+# (fon, yazı) — Sheet-dəki rənglərlə eynidir
+STATUS_STYLE = {
+    STATUS_RECEIVED: ("#e5e7eb", "#111827"),
+    STATUS_REVIEW: ("#fde68a", "#78350f"),
+    STATUS_APPROVED: ("#15803d", "#ffffff"),
+    STATUS_CANCELLED: ("#b91c1c", "#ffffff"),
+}
 
 
-# 2. TƏHLÜKƏSİZ GOOGLE SHEETS BAĞLANTISI (Çökməyən Versiya)
-@st.cache_resource
-def get_spreadsheet():
-    # A) İlk öncə Streamlit Cloud-un gizli "Secrets" hissəsini yoxlayır
-    if "gcp_service_account" in st.secrets:
-        try:
-            creds_dict = dict(st.secrets["gcp_service_account"])
-            creds_dict["private_key"] = creds_dict["private_key"].replace(
-                "\\n", "\n"
-            )
-            scopes = [
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive",
-            ]
-            creds = Credentials.from_service_account_info(
-                creds_dict, scopes=scopes
-            )
-            client = gspread.authorize(creds)
-            return client.open(SHEET_NAME)
-        except Exception as e:
-            st.error(f"Secrets oxunarkən xəta baş verdi: {e}")
+# ---------- Köməkçilər ----------
 
-    # B) Əgər lokalda işlədirsinizsə, "credentials.json" faylını yoxlayır
-    elif os.path.exists("credentials.json"):
-        try:
-            client = gspread.service_account(filename="credentials.json")
-            return client.open(SHEET_NAME)
-        except Exception as e:
-            st.error(f"credentials.json oxunarkən xəta baş verdi: {e}")
+def status_badge(status):
+    bg, fg = STATUS_STYLE.get(status, ("#e5e7eb", "#111827"))
+    return (
+        f'<span style="background:{bg};color:{fg};padding:4px 12px;'
+        f'border-radius:999px;font-weight:600;white-space:nowrap;">{status}</span>'
+    )
 
-    # C) Hər ikisi yoxdursa, proqramı çökdürmür, istifadəçiyə kömək edir
+
+def to_number(text):
+    text = (text or "").strip().replace(",", ".")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def fmt_number(value):
+    if value is None:
+        return ""
+    return str(int(value)) if float(value).is_integer() else str(value)
+
+
+def safe_filename(text):
+    return re.sub(r'[\\/:*?"<>|]+', "", text).strip()
+
+
+def check_tutor_login(code, password):
+    tutors = st.secrets.get("tutors", {})
+    entry = tutors.get(code)
+    if entry and hmac.compare_digest(password.encode(), entry["password"].encode()):
+        return entry["name"].strip()
     return None
 
 
-sh = get_spreadsheet()
+# ---------- Giriş ----------
 
-if sh is None:
-    st.warning("⚠️ Google Cloud icazəsi (credentials) tapılmadı!")
+def login_page():
+    st.title("🎓 25% ödəniş müraciəti")
+    tab_student, tab_tutor = st.tabs(["Tələbə", "Tutor"])
+
+    with tab_student:
+        with st.form("student_login"):
+            fin = st.text_input("FIN kod")
+            password = st.text_input("Parol", type="password", help="Parol FIN kodunuzdur.")
+            ok = st.form_submit_button("Daxil ol")
+        if ok:
+            fin_n = fin.strip().upper()
+            if fin_n and password.strip().upper() == fin_n and db.get_student(fin_n):
+                st.session_state.update(role="student", fin=fin_n)
+                st.rerun()
+            st.error("FIN kod və ya parol yanlışdır.")
+
+    with tab_tutor:
+        with st.form("tutor_login"):
+            code = st.text_input("Kod")
+            password = st.text_input("Parol", type="password")
+            ok = st.form_submit_button("Daxil ol")
+        if ok:
+            name = check_tutor_login(code.strip(), password)
+            if name:
+                st.session_state.update(role="tutor", tutor_name=name)
+                st.rerun()
+            st.error("Kod və ya parol yanlışdır.")
+
+
+# ---------- Tələbə ----------
+
+def student_page(fin):
+    student = db.get_student(fin)
+    if student is None:
+        st.error("Tələbə məlumatı tapılmadı.")
+        return
+
+    st.title(f"Salam, {student['name']}")
     st.markdown(
-        """
-    ### 🛠️ Necə düzəltməli?
-    Saytın çökməməsi üçün aşağıdakı addımlardan **biri** mütləq edilməlidir:
-    
-    * **Streamlit Cloud-da (Tövsiyə olunan):**
-      1. Ekranın sağ aşağısındakı **Manage app** düyməsinə klikləyin.
-      2. Üç nöqtədən **Settings** → **Secrets** bölməsinə keçin (aşağıdakı şəkildəki kimi).
-      3. Google Cloud JSON faylınızın içindəki məlumatları bura yerləşdirin.
-    """
+        f"**İxtisas:** {student['specialty']}  \n"
+        f"**Kurs:** {student['course']} · **Qrup:** {student['group']} · "
+        f"**Ödəniş forması:** {student['payment_form']}"
     )
-    # image_6.png
-    st.info(
-        "Lokalda işləyirsinizsə, proyekt qovluğuna 'credentials.json' faylını əlavə edin."
+
+    tab_new, tab_mine = st.tabs(["Yeni müraciət", "Müraciətlərim"])
+    with tab_new:
+        apply_form(student)
+    with tab_mine:
+        my_applications(fin)
+
+
+def apply_form(student):
+    subjects = db.list_subjects(student["specialty_code"])
+    if not subjects:
+        st.info("Bu ixtisas üçün fənn siyahısı tapılmadı. Komissiya ilə əlaqə saxlayın.")
+        return
+
+    idx = st.selectbox(
+        "Fənn",
+        options=list(range(len(subjects))),
+        index=None,
+        format_func=lambda i: f"{subjects[i]['subject']} ({subjects[i]['semester']})",
+        placeholder="Fənn seçin",
     )
-    st.stop()
+    if idx is not None:
+        c1, c2 = st.columns(2)
+        c1.metric("Semestr", subjects[idx]["semester"])
+        c2.metric("Kredit", subjects[idx]["credits"])
+
+    with st.form("apply_form"):
+        receipt = st.file_uploader(
+            "Ödənişin qəbzi (PDF, JPG və ya PNG)",
+            type=["pdf", "jpg", "jpeg", "png"],
+        )
+        submitted = st.form_submit_button("Müraciət et", type="primary")
+
+    if not submitted:
+        return
+
+    problems = []
+    if idx is None:
+        problems.append("Fənn seçin.")
+    if receipt is None:
+        problems.append("Qəbzi yükləyin.")
+    elif receipt.size > MAX_RECEIPT_MB * 1024 * 1024:
+        problems.append(f"Fayl {MAX_RECEIPT_MB} MB-dan böyük ola bilməz.")
+    if idx is not None:
+        chosen = subjects[idx]
+        for a in db.list_applications(fin=student["fin"]):
+            if (
+                a["subject"] == chosen["subject"]
+                and a["semester"] == chosen["semester"]
+                and a["status"] != STATUS_CANCELLED
+            ):
+                problems.append("Bu fənn üçün artıq aktiv müraciətiniz var.")
+                break
+
+    if problems:
+        for p in problems:
+            st.error(p)
+        return
+
+    now = datetime.now(BAKU)
+    ext = Path(receipt.name).suffix.lower()
+    file_name = f"{safe_filename(student['name'])}_{now:%Y-%m-%d_%H-%M-%S}{ext}"
+
+    db.create_application(
+        {
+            "date": now.strftime("%d.%m.%Y %H:%M:%S"),
+            "fin": student["fin"],
+            "name": student["name"],
+            "specialty": student["specialty"],
+            "course": student["course"],
+            "group": student["group"],
+            "division": student["language"],
+            "payment_form": student["payment_form"],
+            "subject": chosen["subject"],
+            "semester": chosen["semester"],
+            "credits": chosen["credits"],
+            "exam_date": "",
+            "entry_score": "",
+            "exam_score": "",
+            "result": "",
+            "status": STATUS_RECEIVED,
+        },
+        receipt_bytes=receipt.getvalue(),
+        receipt_name=file_name,
+    )
+    st.success("Müraciətiniz qəbul edildi.")
 
 
-# 3. MƏLUMATLARIN YÜKLƏNMƏSİ
-@st.cache_data(ttl=30)
-def load_data():
+def my_applications(fin):
+    apps = db.list_applications(fin=fin)
+    if not apps:
+        st.info("Hələ müraciətiniz yoxdur.")
+        return
+    for a in reversed(apps):
+        with st.container(border=True):
+            left, right = st.columns([3, 2])
+            left.markdown(
+                f"**{a['subject']}**  \n"
+                f"{a['semester']} · {a['credits']} kredit · {a['date']}"
+            )
+            right.markdown(status_badge(a["status"]), unsafe_allow_html=True)
+
+
+# ---------- Tutor ----------
+
+def tutor_page(tutor_name):
+    st.title("Tutor paneli")
+    st.caption(f"Tutor: {tutor_name}")
+
+    mine = []
+    for a in db.list_applications():
+        student = db.get_student(a["fin"])
+        if student and student["tutor"] == tutor_name:
+            mine.append((a, student))
+
+    if not mine:
+        st.info("Sizin tələbələrinizə aid müraciət yoxdur.")
+        return
+
+    status_filter = st.selectbox("Status filtri", ["Hamısı"] + STATUSES)
+    if status_filter != "Hamısı":
+        mine = [(a, s) for a, s in mine if a["status"] == status_filter]
+    if not mine:
+        st.info("Bu statusda müraciət yoxdur.")
+        return
+
+    idx = st.selectbox(
+        "Müraciət",
+        options=list(range(len(mine))),
+        format_func=lambda i: (
+            f"{mine[i][1]['name']} · {mine[i][0]['subject']} · {mine[i][0]['date']}"
+        ),
+    )
+    app, student = mine[idx]
+
+    left, right = st.columns([1, 1], gap="large")
+    with left:
+        application_editor(app, student)
+    with right:
+        receipt_viewer(app)
+
+
+def application_editor(app, student):
+    st.subheader(student["name"])
+    st.markdown(
+        f"**FIN:** {student['fin']}  \n"
+        f"**İxtisas:** {student['specialty']} · **Kurs:** {student['course']} · "
+        f"**Qrup:** {student['group']}  \n"
+        f"**Fənn:** {app['subject']} · **Semestr:** {app['semester']} · "
+        f"**Kredit:** {app['credits']}  \n"
+        f"**Müraciət tarixi:** {app['date']}"
+    )
+
+    with st.form(f"edit_{app['row']}"):
+        entry_text = st.text_input("Giriş balı", value=app["entry_score"])
+        exam_text = st.text_input("İmtahanda topladığı bal", value=app["exam_score"])
+        status = st.selectbox(
+            "Müraciətin statusu",
+            STATUSES,
+            index=STATUSES.index(app["status"]) if app["status"] in STATUSES else 0,
+        )
+        saved = st.form_submit_button("Yadda saxla", type="primary")
+
+    if not saved:
+        return
+
+    entry, exam = to_number(entry_text), to_number(exam_text)
+    if (entry_text.strip() and entry is None) or (exam_text.strip() and exam is None):
+        st.error("Balları rəqəm kimi yazın (məsələn 72 və ya 72.5).")
+        return
+
+    # Nəticə = Giriş balı + İmtahanda topladığı bal
+    result = fmt_number(entry + exam) if entry is not None and exam is not None else ""
+
+    db.update_application(app["row"], {
+        "entry_score": fmt_number(entry),
+        "exam_score": fmt_number(exam),
+        "result": result,
+        "status": status,
+    })
+    st.success(f"Yadda saxlandı. Nəticə: {result or '—'}")
+
+
+def receipt_viewer(app):
+    st.subheader("Ödənişin qəbzi")
+    if not app["receipt"]:
+        st.warning("Qəbz yüklənməyib.")
+        return
     try:
-        students = pd.DataFrame(sh.worksheet("Tələbə bazası").get_all_records())
-        plans = pd.DataFrame(sh.worksheet("Tədris planı").get_all_records())
-        requests = pd.DataFrame(sh.worksheet("Müraciətlər").get_all_records())
-        return students, plans, requests
-    except Exception as e:
-        st.error(f"Cədvəldən məlumatları oxumaq mümkün olmadı: {e}")
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        data, mime = db.get_receipt(app["receipt"])
+    except Exception:
+        st.error("Qəbz açılmadı. Drive icazələrini yoxlayın.")
+        return
+
+    zoom = st.slider(
+        "Yaxınlıq (%)", min_value=50, max_value=300, value=100, step=10,
+        key=f"zoom_{app['row']}",
+    )
+
+    if mime == "application/pdf":
+        b64 = base64.b64encode(data).decode()
+        components.html(
+            f'<iframe src="data:application/pdf;base64,{b64}#zoom={zoom}" '
+            f'style="width:100%;height:800px;border:none;"></iframe>',
+            height=820,
+        )
+    elif mime.startswith("image/"):
+        st.image(data, width=int(600 * zoom / 100))
+
+    ext = mimetypes.guess_extension(mime) or ""
+    st.download_button(
+        "Qəbzi yüklə", data, file_name=f"qebz_{app['row']}{ext}", mime=mime,
+    )
 
 
-students_df, plans_df, requests_df = load_data()
+# ---------- Əsas axın ----------
+
+def main():
+    if st.session_state.get("role") is None:
+        login_page()
+        return
+
+    with st.sidebar:
+        if st.button("Çıxış"):
+            st.session_state.clear()
+            st.rerun()
+
+    if st.session_state["role"] == "student":
+        student_page(st.session_state["fin"])
+    else:
+        tutor_page(st.session_state["tutor_name"])
 
 
-# 4. MÜRACİƏT ƏLAVƏ ETMƏK FUNKSİYASI
-def add_request(
-    student: dict, subject: dict, giris_bali: float, imtahan_bali: float
-):
-    try:
-        ws = sh.worksheet("Müraciətlər")
-        now = datetime.now().strftime("%Y-%m-%d %H:%M")
-        row = [
-            now,  # Müraciət qeydiyyat tarixi
-            student.get("Finkod", ""),
-            student.get("Tələbənin S.A.A", ""),
-            student.get("İxtisas", ""),
-            student.get("Kurs", ""),
-            student.get("Akademik qrup", ""),
-            student.get("Tədris dili", ""),
-            student.get("Ödəniş forması", ""),
-            subject.get("Fənnin adı", ""),
-            subject.get("semestr", ""),
-            subject.get("Kredit", ""),
-            "25%",  # Müraciət növü
-            now,  # Tarix
-            giris_bali,
-            imtahan_bali,
-            giris_bali + imtahan_bali,  # Yekun
-            "Gözləmədə",  # Status
-            "",  # Qəbz/Qeyd
-        ]
-        ws.append_row(row, value_input_option="USER_ENTERED")
-        st.cache_data.clear()
-        return True
-    except Exception as e:
-        st.error(f"Müraciət göndərilərkən xəta: {e}")
-        return False
-
-
-# 5. STATUS YENİLƏMƏ
-def update_status(row_index: int, new_status: str):
-    try:
-        ws = sh.worksheet("Müraciətlər")
-        # Python-da index 0-dan başlayır, Google Sheets-də 1-ci sətir başlıqdır (+2 sətir sürüşməsi)
-        # Sütun 17 (Q sütunu) "Müraciətin statusu" üçün nəzərdə tutulub
-        ws.update_cell(row_index + 2, 17, new_status)
-        st.cache_data.clear()
-        return True
-    except Exception as e:
-        st.error(f"Status yenilənərkən xəta: {e}")
-        return False
-
-
-# 6. PORTAL INTERFEYSI
-tab_student, tab_admin = st.tabs(["🎓 Tələbə Bölməsi", "🔐 Admin Panel"])
-
-# --- A) TƏLƏBƏ BÖLMƏSİ ---
-with tab_student:
-    fin = st.text_input("FİN kodunuzu daxil edin:", max_chars=7).strip().upper()
-
-    if fin:
-        if "Finkod" in students_df.columns:
-            students_df["Finkod"] = (
-                students_df["Finkod"].astype(str).str.strip().str.upper()
-            )
-            match = students_df[students_df["Finkod"] == fin]
-        else:
-            match = pd.DataFrame()
-
-        if match.empty:
-            st.error("Bu FİN kod tələbə bazasında tapılmadı.")
-        else:
-            student = match.iloc[0].to_dict()
-            st.success(
-                f"Xoş gördük, {student.get('Tələbənin S.A.A')}! Qrup: {student.get('Akademik qrup')} ({student.get('İxtisas')})"
-            )
-
-            # İxtisasa uyğun fənlər
-            ixtisas_plans = plans_df[plans_df["İxtisas"] == student["İxtisas"]]
-            if ixtisas_plans.empty:
-                ixtisas_plans = plans_df
-
-            st.write("---")
-            st.subheader("📝 Yeni müraciət forması")
-            with st.form("new_request_form"):
-                fenn_adi = st.selectbox(
-                    "Müraciət edilən fənn:",
-                    ixtisas_plans["Fənnin adı"].unique()
-                    if not ixtisas_plans.empty
-                    else ["Fənn yoxdur"],
-                )
-                c1, c2 = st.columns(2)
-                giris = c1.number_input(
-                    "Giriş balı (max 50):",
-                    min_value=0.0,
-                    max_value=50.0,
-                    value=0.0,
-                )
-                imtahan = c2.number_input(
-                    "İmtahan balı (max 50):",
-                    min_value=0.0,
-                    max_value=50.0,
-                    value=0.0,
-                )
-
-                if st.form_submit_button("Müraciəti təsdiqlə və göndər"):
-                    if fenn_adi and fenn_adi != "Fənn yoxdur":
-                        subj = ixtisas_plans[
-                            ixtisas_plans["Fənnin adı"] == fenn_adi
-                        ].iloc[0].to_dict()
-                        if add_request(student, subj, giris, imtahan):
-                            st.success("Müraciətiniz uğurla göndərildi!")
-                            st.rerun()
-                    else:
-                        st.error("Zəhmət olmasa düzgün fənn seçin.")
-
-            # Mövcud müraciətlərini göstər
-            if not requests_df.empty and "Fin kod" in requests_df.columns:
-                requests_df["Fin kod"] = (
-                    requests_df["Fin kod"].astype(str).str.strip().str.upper()
-                )
-                my_reqs = requests_df[requests_df["Fin kod"] == fin]
-
-                if not my_reqs.empty:
-                    st.write("---")
-                    st.subheader("📂 Əvvəlki Müraciətləriniz")
-                    st.dataframe(
-                        my_reqs[
-                            [
-                                "Müraciət qeydiyyat tarixi:",
-                                "Fənn",
-                                "Nəticə",
-                                "Müraciətin statusu",
-                            ]
-                        ],
-                        hide_index=True,
-                    )
-
-# --- B) ADMIN PANEL ---
-with tab_admin:
-    st.subheader("Sistem İdarəçisi")
-    pwd = st.text_input("Admin şifrəsi:", type="password")
-
-    # Sadə admin təhlükəsizliyi
-    if pwd == "12345":
-        st.success("Giriş təsdiqləndi.")
-
-        if requests_df.empty:
-            st.info("Sistemdə hələ heç bir müraciət yoxdur.")
-        else:
-            st.write("### 📋 Bütün Müraciətlər")
-            st.dataframe(requests_df)
-
-            st.write("---")
-            st.subheader("✏️ Status Yenilə")
-
-            idx = st.number_input(
-                "Sətir nömrəsi (Index):",
-                min_value=0,
-                max_value=len(requests_df) - 1,
-                value=0,
-                step=1,
-            )
-            status = st.selectbox(
-                "Yeni status seçin:",
-                ["Gözləmədə", "Təsdiqləndi", "İmtina edildi", "Ləğv edildi"],
-            )
-
-            if st.button("Statusu Yenilə", type="primary"):
-                if update_status(int(idx), status):
-                    st.success("Status uğurla güncəlləndi!")
-                    st.rerun()
+main()
