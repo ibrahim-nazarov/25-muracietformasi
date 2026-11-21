@@ -27,7 +27,6 @@ STUDENT_COLS = {
     "specialty_code": "İxtisasın şifri",
     "fin": "Finkod",
     "tutor": "Tyutor",
-    "tutor_email": "Tyutor maili",
     "payment_form": "Ödəniş forması",
     "language": "Tədris dili",
     "course": "Kurs",
@@ -41,8 +40,8 @@ CURRICULUM_COLS = {
 }
 
 TUTOR_COLS = {
-    "email": "Tyutor maili",
-    "password_hash": "Parol hash",
+    "name": "Tyutor",
+    "password": "Parol",
 }
 
 APP_COLS = {
@@ -117,15 +116,15 @@ def get_student(fin):
     return None
 
 
-def get_tutor(email):
-    email = (email or "").strip().lower()
-    for r in _read_tab(TUTORS_TAB):
-        if r.get(TUTOR_COLS["email"], "").strip().lower() == email:
-            return {
-                "email": email,
-                "password_hash": r.get(TUTOR_COLS["password_hash"], "").strip(),
-            }
-    return None
+def list_tutors():
+    return [
+        {
+            "name": r.get(TUTOR_COLS["name"], ""),
+            "password": r.get(TUTOR_COLS["password"], ""),
+        }
+        for r in _read_tab(TUTORS_TAB)
+        if r.get(TUTOR_COLS["name"], "") and r.get(TUTOR_COLS["password"], "")
+    ]
 
 
 def list_subjects(specialty_code):
