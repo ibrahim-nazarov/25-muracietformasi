@@ -148,6 +148,10 @@ def student_page(fin):
         f"**Ödəniş forması:** {student['payment_form']}"
     )
 
+    flash = st.session_state.pop("flash", None)
+    if flash:
+        st.success(flash)
+
     tab_new, tab_mine = st.tabs(["Yeni müraciət", "Müraciətlərim"])
     with tab_new:
         apply_form(student, season)
@@ -173,57 +177,56 @@ def apply_form(student, season):
         )
         return
 
+    taken = {(a["subject"], a["semester"]) for a in active}
+    by_key = {}
+    for s in db.list_subjects(student["specialty_code"]):
+        if season_key(s["semester"]) != season_key(season):
+            continue
+        if (s["subject"], s["semester"]) in taken:
+            continue
+        by_key[f"{s['subject']}||{s['semester']}"] = s
+
+    if not by_key:
+        st.info(f"Bu ixtisas üçün {season_label(season)} semestrində müraciət edilə biləcək fənn yoxdur.")
+        return
+
     st.caption(
         f"Açıq semestr: {season_label(season)} · "
         f"Qalan müraciət hüququ: {remaining} fən"
     )
 
-    subjects = [
-        s for s in db.list_subjects(student["specialty_code"])
-        if season_key(s["semester"]) == season_key(season)
-    ]
-    if not subjects:
-        st.info(f"Bu ixtisas üçün {season_label(season)} semestrində fənn tapılmadı.")
-        return
-
-    idx = st.selectbox(
-        "Fənn",
-        options=list(range(len(subjects))),
-        index=None,
-        format_func=lambda i: f"{subjects[i]['subject']} ({subjects[i]['semester']})",
-        placeholder="Fənn seçin",
-    )
-    if idx is not None:
-        c1, c2 = st.columns(2)
-        c1.metric("Semestr", subjects[idx]["semester"])
-        c2.metric("Kredit", subjects[idx]["credits"])
-
     with st.form("apply_form"):
+        chosen_keys = st.multiselect(
+            f"Fənnlər (ən çox {remaining} seçin)",
+            options=list(by_key),
+            format_func=lambda k: (
+                f"{by_key[k]['subject']} · {by_key[k]['semester']} · "
+                f"{by_key[k]['credits']} kredit"
+            ),
+            max_selections=remaining,
+            placeholder="Fənn seçin",
+        )
         receipt = st.file_uploader(
             "Ödənişin qəbzi (PDF, JPG və ya PNG)",
             type=["pdf", "jpg", "jpeg", "png"],
+            help="Seçdiyiniz bütün fənnlər üçün bir qəbz yükləyin.",
         )
         submitted = st.form_submit_button("Müraciət et", type="primary")
 
     if not submitted:
         return
 
+    chosen = [by_key[k] for k in chosen_keys]
+
     problems = []
-    if idx is None:
-        problems.append("Fənn seçin.")
+    if not chosen:
+        problems.append("Ən azı bir fənn seçin.")
+    if len(chosen) > remaining:
+        problems.append(f"Ən çox {remaining} fən seçə bilərsiniz.")
     if receipt is None:
         problems.append("Qəbzi yükləyin.")
     elif receipt.size > MAX_RECEIPT_MB * 1024 * 1024:
         problems.append(f"Fayl {MAX_RECEIPT_MB} MB-dan böyük ola bilməz.")
-    if len(active) >= MAX_SUBJECTS:
-        problems.append(f"Ən çox {MAX_SUBJECTS} fənnə müraciət etmək olar.")
-    if idx is not None:
-        chosen = subjects[idx]
-        if any(
-            a["subject"] == chosen["subject"] and a["semester"] == chosen["semester"]
-            for a in active
-        ):
-            problems.append("Bu fənn üçün artıq aktiv müraciətiniz var.")
 
     if problems:
         for p in problems:
@@ -233,29 +236,34 @@ def apply_form(student, season):
     now = datetime.now(BAKU)
     ext = Path(receipt.name).suffix.lower()
     file_name = f"{safe_filename(student['name'])}_{now:%Y-%m-%d_%H-%M-%S}{ext}"
+    date_text = now.strftime("%d.%m.%Y %H:%M:%S")
 
-    record = {
-        "date": now.strftime("%d.%m.%Y %H:%M:%S"),
-        "fin": student["fin"],
-        "name": student["name"],
-        "specialty": student["specialty"],
-        "course": student["course"],
-        "group": student["group"],
-        "division": student["language"],
-        "payment_form": student["payment_form"],
-        "subject": chosen["subject"],
-        "semester": chosen["semester"],
-        "credits": chosen["credits"],
-        "exam_date": "",
-        "entry_score": "",
-        "exam_score": "",
-        "result": "",
-        "status": STATUS_RECEIVED,
-    }
+    # Hər seçilmiş fənn üçün ayrı sətir, eyni tələbə məlumatı və eyni qəbz linki
+    records = [
+        {
+            "date": date_text,
+            "fin": student["fin"],
+            "name": student["name"],
+            "specialty": student["specialty"],
+            "course": student["course"],
+            "group": student["group"],
+            "division": student["language"],
+            "payment_form": student["payment_form"],
+            "subject": s["subject"],
+            "semester": s["semester"],
+            "credits": s["credits"],
+            "exam_date": "",
+            "entry_score": "",
+            "exam_score": "",
+            "result": "",
+            "status": STATUS_RECEIVED,
+        }
+        for s in chosen
+    ]
 
     try:
-        db.create_application(
-            record,
+        db.create_applications(
+            records,
             receipt_bytes=receipt.getvalue(),
             receipt_name=file_name,
         )
@@ -264,7 +272,8 @@ def apply_form(student, season):
         st.code(f"{type(e).__name__}: {str(e)[:800]}")
         return
 
-    st.success("Müraciətiniz qəbul edildi.")
+    st.session_state["flash"] = f"{len(chosen)} fən üzrə müraciətiniz qəbul edildi."
+    st.rerun()
 
 
 def my_applications(fin):
@@ -309,94 +318,125 @@ def tutor_page(tutor_name):
         season_block(tutor)
         st.divider()
 
-    mine = []
-    for a in db.list_applications():
-        student = db.get_student(a["fin"])
-        if student and student["tutor"] == tutor_name:
-            mine.append((a, student))
-
-    if not mine:
-        st.info("Sizin tələbələrinizə aid müraciət yoxdur.")
-        return
-
     status_filter = st.selectbox("Status filtri", ["Hamısı"] + STATUSES)
-    if status_filter != "Hamısı":
-        mine = [(a, s) for a, s in mine if a["status"] == status_filter]
-    if not mine:
-        st.info("Bu statusda müraciət yoxdur.")
+
+    # Tələbə üzrə qruplaşdırma: bir tələbənin bütün fənləri bir yerdə görünür
+    groups = {}
+    for a in db.list_applications():
+        if status_filter != "Hamısı" and a["status"] != status_filter:
+            continue
+        student = db.get_student(a["fin"])
+        if not student or student["tutor"] != tutor_name:
+            continue
+        key = a["fin"].upper()
+        group = groups.setdefault(key, {"student": student, "apps": []})
+        group["apps"].append(a)
+
+    if not groups:
+        st.info("Bu filtrə uyğun müraciət yoxdur.")
         return
 
-    idx = st.selectbox(
-        "Müraciət",
-        options=list(range(len(mine))),
-        format_func=lambda i: (
-            f"{mine[i][1]['name']} · {mine[i][0]['subject']} · {mine[i][0]['date']}"
+    fin_key = st.selectbox(
+        "Tələbə",
+        options=list(groups),
+        format_func=lambda f: (
+            f"{groups[f]['student']['name']} · {len(groups[f]['apps'])} fən"
         ),
     )
-    app, student = mine[idx]
+    student = groups[fin_key]["student"]
+    apps = groups[fin_key]["apps"]
 
     left, right = st.columns([1, 1], gap="large")
     with left:
-        application_editor(app, student)
+        student_header(student)
+        for app in apps:
+            score_form(app)
     with right:
-        receipt_viewer(app)
+        links = []
+        for a in apps:
+            if a["receipt"] and a["receipt"] not in links:
+                links.append(a["receipt"])
+        if not links:
+            st.warning("Qəbz yüklənməyib.")
+        for n, link in enumerate(links, start=1):
+            covered = ", ".join(a["subject"] for a in apps if a["receipt"] == link)
+            receipt_viewer(
+                link,
+                key=f"{fin_key}_{n}",
+                title="Ödənişin qəbzi" if len(links) == 1 else f"Ödənişin qəbzi {n}",
+                note=f"Bu qəbz əhatə edir: {covered}",
+            )
 
 
-def application_editor(app, student):
+def student_header(student):
     st.subheader(student["name"])
     st.markdown(
         f"**FIN:** {student['fin']}  \n"
         f"**İxtisas:** {student['specialty']} · **Kurs:** {student['course']} · "
         f"**Qrup:** {student['group']}  \n"
-        f"**Fənn:** {app['subject']} · **Semestr:** {app['semester']} · "
-        f"**Kredit:** {app['credits']}  \n"
-        f"**Müraciət tarixi:** {app['date']}"
+        f"**Ödəniş forması:** {student['payment_form']}"
     )
 
-    with st.form(f"edit_{app['row']}"):
-        entry_text = st.text_input("Giriş balı", value=app["entry_score"])
-        exam_text = st.text_input("İmtahanda topladığı bal", value=app["exam_score"])
-        status = st.selectbox(
-            "Müraciətin statusu",
-            STATUSES,
-            index=STATUSES.index(app["status"]) if app["status"] in STATUSES else 0,
+
+def score_form(app):
+    row = app["row"]
+    with st.container(border=True):
+        st.markdown(
+            f"**{app['subject']}**  \n"
+            f"{app['semester']} · {app['credits']} kredit · müraciət: {app['date']}"
         )
-        saved = st.form_submit_button("Yadda saxla", type="primary")
+        st.markdown(status_badge(app["status"]), unsafe_allow_html=True)
 
-    if not saved:
-        return
+        with st.form(f"edit_{row}"):
+            entry_text = st.text_input(
+                "Giriş balı", value=app["entry_score"], key=f"entry_{row}"
+            )
+            exam_text = st.text_input(
+                "İmtahanda topladığı bal", value=app["exam_score"], key=f"exam_{row}"
+            )
+            status = st.selectbox(
+                "Müraciətin statusu",
+                STATUSES,
+                index=STATUSES.index(app["status"]) if app["status"] in STATUSES else 0,
+                key=f"status_{row}",
+            )
+            saved = st.form_submit_button("Yadda saxla", type="primary")
 
-    entry, exam = to_number(entry_text), to_number(exam_text)
-    if (entry_text.strip() and entry is None) or (exam_text.strip() and exam is None):
-        st.error("Balları rəqəm kimi yazın (məsələn 72 və ya 72.5).")
-        return
+        if saved:
+            entry, exam = to_number(entry_text), to_number(exam_text)
+            if (entry_text.strip() and entry is None) or (exam_text.strip() and exam is None):
+                st.error("Balları rəqəm kimi yazın (məsələn 72 və ya 72.5).")
+                return
 
-    # Nəticə = Giriş balı + İmtahanda topladığı bal
-    result = fmt_number(entry + exam) if entry is not None and exam is not None else ""
+            # Nəticə = Giriş balı + İmtahanda topladığı bal
+            result = fmt_number(entry + exam) if entry is not None and exam is not None else ""
 
-    db.update_application(app["row"], {
-        "entry_score": fmt_number(entry),
-        "exam_score": fmt_number(exam),
-        "result": result,
-        "status": status,
-    })
-    st.success(f"Yadda saxlandı. Nəticə: {result or '—'}")
+            db.update_application(row, {
+                "entry_score": fmt_number(entry),
+                "exam_score": fmt_number(exam),
+                "result": result,
+                "status": status,
+            })
+            st.success(f"Yadda saxlandı. Nəticə: {result or '—'}")
 
 
-def receipt_viewer(app):
-    st.subheader("Ödənişin qəbzi")
-    if not app["receipt"]:
-        st.warning("Qəbz yüklənməyib.")
-        return
+def receipt_viewer(link, key, title, note=""):
+    st.subheader(title)
+    if note:
+        st.caption(note)
     try:
-        data, mime = db.get_receipt(app["receipt"])
+        data, mime = db.get_receipt(link)
     except Exception:
         st.error("Qəbz açılmadı. Drive icazələrini yoxlayın.")
         return
 
     zoom = st.slider(
-        "Yaxınlıq (%)", min_value=50, max_value=300, value=100, step=10,
-        key=f"zoom_{app['row']}",
+        "Yaxınlıq (%)",
+        min_value=50,
+        max_value=300,
+        value=100,
+        step=10,
+        key=f"zoom_{key}",
     )
 
     if mime == "application/pdf":
@@ -411,7 +451,11 @@ def receipt_viewer(app):
 
     ext = mimetypes.guess_extension(mime) or ""
     st.download_button(
-        "Qəbzi yüklə", data, file_name=f"qebz_{app['row']}{ext}", mime=mime,
+        "Qəbzi yüklə",
+        data,
+        file_name=f"qebz_{key}{ext}",
+        mime=mime,
+        key=f"dl_{key}",
     )
 
 
