@@ -8,6 +8,7 @@ import requests
 import streamlit as st
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
+from gspread.utils import rowcol_to_a1
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -93,7 +94,6 @@ def _col_index(headers, header):
 
 
 def _read_tab_raw(tab_name):
-    """Cədvəli keşsiz oxuyur — hər çağırışda Sheet-dəki ən son dəyər gəlir."""
     ws = _spreadsheet().worksheet(tab_name)
     values = ws.get_all_values()
     if not values:
@@ -110,10 +110,16 @@ def _read_tab_raw(tab_name):
     return records
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=30, show_spinner=False)
 def _read_tab(tab_name):
     """Dəyişməyən cədvəllər (tələbə, plan, tutorlar) 30 saniyə keşdə saxlanılır."""
     return _read_tab_raw(tab_name)
+
+
+@st.cache_data(ttl=3, show_spinner=False)
+def _applications_rows():
+    """Müraciətlər 3 saniyə keşdə saxlanılır. Yazma olanda keş təmizlənir."""
+    return _read_tab_raw(APPLICATIONS_TAB)
 
 
 def get_student(fin):
@@ -157,9 +163,8 @@ def list_subjects(specialty_code):
 
 
 def list_applications(fin=None):
-    """Müraciətlər həmişə keşsiz oxunur ki, Sheet-dəki dəyişiklik dərhal görünsün."""
     result = []
-    for r in _read_tab_raw(APPLICATIONS_TAB):
+    for r in _applications_rows():
         item = {k: r.get(h, "") for k, h in APP_COLS.items()}
         if not item["fin"]:
             continue  # boş sətirləri ötür
@@ -190,7 +195,6 @@ def create_applications(records, receipt_bytes, receipt_name):
     ws = _spreadsheet().worksheet(APPLICATIONS_TAB)
     headers = [h.strip() for h in ws.row_values(1)]
 
-    # Əvvəlcə başlıqları yoxlayırıq, sonra faylı yükləyirik
     for header in APP_COLS.values():
         _col_index(headers, header)
 
@@ -204,13 +208,22 @@ def create_applications(records, receipt_bytes, receipt_name):
             row[_col_index(headers, header) - 1] = str(record.get(key, ""))
         rows.append(row)
     ws.append_rows(rows, value_input_option="RAW")
+    _applications_rows.clear()
 
 
 def update_application(row, updates):
+    """Bütün dəyişən xanaları bir sorğuda yazır (sürətli)."""
     ws = _spreadsheet().worksheet(APPLICATIONS_TAB)
     headers = [h.strip() for h in ws.row_values(1)]
-    for key, value in updates.items():
-        ws.update_cell(row, _col_index(headers, APP_COLS[key]), value)
+    data = [
+        {
+            "range": rowcol_to_a1(row, _col_index(headers, APP_COLS[key])),
+            "values": [[str(value)]],
+        }
+        for key, value in updates.items()
+    ]
+    ws.batch_update(data)
+    _applications_rows.clear()
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
