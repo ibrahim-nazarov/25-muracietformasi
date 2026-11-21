@@ -1,13 +1,13 @@
-"""Google Sheets və Google Drive ilə məlumat qatı."""
-import io
+"""Google Sheets və Drive ilə məlumat qatı."""
+import base64
 import mimetypes
 import re
 
 import gspread
+import requests
 import streamlit as st
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -68,12 +68,13 @@ def _clients():
     return gc, drive
 
 
+@st.cache_resource
 def _spreadsheet():
     gc, _ = _clients()
     return gc.open_by_key(st.secrets["sheet_id"])
 
 
-def _code(value: str) -> str:
+def _code(value):
     # Sheets kodu rəqəm kimi saxlasa, baş sıfır itə bilər (050213 -> 50213)
     return (value or "").strip().lstrip("0")
 
@@ -85,7 +86,7 @@ def _col_index(headers, header):
 
 
 @st.cache_data(ttl=60)
-def _read_tab(tab_name: str):
+def _read_tab(tab_name):
     ws = _spreadsheet().worksheet(tab_name)
     values = ws.get_all_values()
     if not values:
@@ -102,14 +103,14 @@ def _read_tab(tab_name: str):
     return records
 
 
-def get_student(fin: str):
+def get_student(fin):
     for r in _read_tab(STUDENTS_TAB):
         if r.get(STUDENT_COLS["fin"], "").upper() == fin:
             return {k: r.get(h, "") for k, h in STUDENT_COLS.items()}
     return None
 
 
-def list_subjects(specialty_code: str):
+def list_subjects(specialty_code):
     return [
         {
             "subject": r.get(CURRICULUM_COLS["subject"], ""),
@@ -122,7 +123,7 @@ def list_subjects(specialty_code: str):
     ]
 
 
-def list_applications(fin: str | None = None):
+def list_applications(fin=None):
     result = []
     for r in _read_tab(APPLICATIONS_TAB):
         item = {k: r.get(h, "") for k, h in APP_COLS.items()}
@@ -134,21 +135,23 @@ def list_applications(fin: str | None = None):
     return result
 
 
-def _upload_receipt(drive, data: bytes, name: str) -> str:
-    mime = mimetypes.guess_type(name)[0] or "application/octet-stream"
-    media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mime, resumable=False)
-    body = {"name": name, "parents": [st.secrets["drive_folder_id"]]}
-    created = drive.files().create(
-        body=body,
-        media_body=media,
-        fields="id, webViewLink",
-        supportsAllDrives=True,
-    ).execute()
-    return created["webViewLink"]
+def _upload_receipt(data, name):
+    """Qəbzi Apps Script vasitəsilə sizin Drive qovluğunuza yükləyir."""
+    payload = {
+        "secret": st.secrets["apps_script_secret"],
+        "file_name": name,
+        "mime_type": mimetypes.guess_type(name)[0] or "application/octet-stream",
+        "data": base64.b64encode(data).decode(),
+    }
+    resp = requests.post(st.secrets["apps_script_url"], json=payload, timeout=120)
+    resp.raise_for_status()
+    result = resp.json()
+    if not result.get("ok"):
+        raise RuntimeError(f"Qəbz yüklənmədi: {result.get('error')}")
+    return result["link"]
 
 
-def create_application(record: dict, receipt_bytes: bytes, receipt_name: str):
-    _, drive = _clients()
+def create_application(record, receipt_bytes, receipt_name):
     ws = _spreadsheet().worksheet(APPLICATIONS_TAB)
     headers = [h.strip() for h in ws.row_values(1)]
 
@@ -156,17 +159,17 @@ def create_application(record: dict, receipt_bytes: bytes, receipt_name: str):
     for header in APP_COLS.values():
         _col_index(headers, header)
 
-    link = _upload_receipt(drive, receipt_bytes, receipt_name)
+    link = _upload_receipt(receipt_bytes, receipt_name)
     record = {**record, "receipt": link}
 
     row = [""] * len(headers)
     for key, header in APP_COLS.items():
         row[_col_index(headers, header) - 1] = str(record.get(key, ""))
-    ws.append_row(row, value_input_option="USER_ENTERED")
+    ws.append_row(row, value_input_option="RAW")
     _read_tab.clear()
 
 
-def update_application(row: int, updates: dict):
+def update_application(row, updates):
     ws = _spreadsheet().worksheet(APPLICATIONS_TAB)
     headers = [h.strip() for h in ws.row_values(1)]
     for key, value in updates.items():
@@ -174,7 +177,7 @@ def update_application(row: int, updates: dict):
     _read_tab.clear()
 
 
-def get_receipt(link: str):
+def get_receipt(link):
     match = re.search(r"/d/([\w-]+)", link)
     if not match:
         raise ValueError("Qəbz linki düzgün deyil.")
