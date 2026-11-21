@@ -98,7 +98,6 @@ SCOPES = [
 def get_google_clients():
     creds_dict = dict(st.secrets["gcp_service_account"])
     
-    # Private key format xətalarını avtomatik təmizləyir
     if "private_key" in creds_dict:
         pk = str(creds_dict["private_key"]).strip()
         pk = pk.replace("\\n", "\n")
@@ -114,12 +113,10 @@ def load_reference_data():
     gc, _ = get_google_clients()
     sh = gc.open_by_key(SPREADSHEET_ID)
     
-    # Tələbə bazası
     ws_students = sh.worksheet("Tələbə bazası")
     df_students = pd.DataFrame(ws_students.get_all_records())
     df_students.columns = [c.strip() for c in df_students.columns]
     
-    # Tədris planı
     ws_curriculum = sh.worksheet("Tədris planı")
     df_curriculum = pd.DataFrame(ws_curriculum.get_all_records())
     df_curriculum.columns = [c.strip() for c in df_curriculum.columns]
