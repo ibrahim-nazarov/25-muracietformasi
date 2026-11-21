@@ -2,6 +2,8 @@
 import base64
 import mimetypes
 import re
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import gspread
 import requests
@@ -9,6 +11,8 @@ import streamlit as st
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from gspread.utils import rowcol_to_a1
+
+BAKU = ZoneInfo("Asia/Baku")
 
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
@@ -44,6 +48,7 @@ TUTOR_COLS = {
     "name": "Tyutor",
     "password": "Parol",
     "season": "Semestr",
+    "deadline": "Tarix və saat",
 }
 
 APP_COLS = {
@@ -65,6 +70,19 @@ APP_COLS = {
     "status": "Müraciətin statusu",
     "receipt": "Ödənişin qəbzi",
 }
+
+# Sheets tarixi müxtəlif formatda qaytara bilər, hamısını tanıyırıq
+DEADLINE_DATETIME_FORMATS = [
+    "%d.%m.%Y %H:%M",
+    "%d.%m.%Y %H:%M:%S",
+    "%d/%m/%Y %H:%M",
+    "%d/%m/%Y %H:%M:%S",
+    "%m/%d/%Y %H:%M",
+    "%m/%d/%Y %H:%M:%S",
+    "%Y-%m-%d %H:%M",
+    "%Y-%m-%d %H:%M:%S",
+]
+DEADLINE_DATE_FORMATS = ["%d.%m.%Y", "%d/%m/%Y", "%m/%d/%Y", "%Y-%m-%d"]
 
 
 @st.cache_resource
@@ -91,6 +109,25 @@ def _col_index(headers, header):
     if header not in headers:
         raise ValueError(f"Sheet-də '{header}' sütunu tapılmadı.")
     return headers.index(header) + 1  # 1-dən başlayır
+
+
+def _parse_deadline(text):
+    """Mətni Bakı vaxtı ilə tarixə çevirir. Tanınmırsa None qaytarır."""
+    text = (text or "").strip()
+    if not text:
+        return None
+    for fmt in DEADLINE_DATETIME_FORMATS:
+        try:
+            return datetime.strptime(text, fmt).replace(tzinfo=BAKU)
+        except ValueError:
+            pass
+    for fmt in DEADLINE_DATE_FORMATS:
+        try:
+            # Yalnız tarix yazılıbsa, həmin günün sonu (23:59) qəbul edilir
+            return datetime.strptime(text, fmt).replace(hour=23, minute=59, tzinfo=BAKU)
+        except ValueError:
+            pass
+    return None
 
 
 def _read_tab_raw(tab_name):
@@ -130,22 +167,43 @@ def get_student(fin):
 
 
 def list_tutors():
-    return [
-        {
-            "name": r.get(TUTOR_COLS["name"], ""),
-            "password": r.get(TUTOR_COLS["password"], ""),
+    result = []
+    for r in _read_tab(TUTORS_TAB):
+        name = r.get(TUTOR_COLS["name"], "")
+        password = r.get(TUTOR_COLS["password"], "")
+        if not name or not password:
+            continue
+        deadline_text = r.get(TUTOR_COLS["deadline"], "")
+        result.append({
+            "name": name,
+            "password": password,
             "season": r.get(TUTOR_COLS["season"], ""),
+            "deadline_text": deadline_text,
+            "deadline": _parse_deadline(deadline_text),
             "row": r["_row"],
-        }
-        for r in _read_tab(TUTORS_TAB)
-        if r.get(TUTOR_COLS["name"], "") and r.get(TUTOR_COLS["password"], "")
-    ]
+        })
+    return result
 
 
 def set_tutor_season(row, season):
     ws = _spreadsheet().worksheet(TUTORS_TAB)
     headers = [h.strip() for h in ws.row_values(1)]
-    ws.update_cell(row, _col_index(headers, TUTOR_COLS["season"]), season)
+    ws.batch_update([{
+        "range": rowcol_to_a1(row, _col_index(headers, TUTOR_COLS["season"])),
+        "values": [[season]],
+    }])
+    _read_tab.clear()
+
+
+def set_tutor_deadline(row, deadline):
+    """deadline=None olarsa xana boşaldılır. Format: dd.mm.yyyy HH:MM"""
+    ws = _spreadsheet().worksheet(TUTORS_TAB)
+    headers = [h.strip() for h in ws.row_values(1)]
+    value = deadline.strftime("%d.%m.%Y %H:%M") if deadline else ""
+    ws.batch_update([{
+        "range": rowcol_to_a1(row, _col_index(headers, TUTOR_COLS["deadline"])),
+        "values": [[value]],
+    }])
     _read_tab.clear()
 
 
