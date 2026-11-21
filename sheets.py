@@ -42,6 +42,7 @@ CURRICULUM_COLS = {
 TUTOR_COLS = {
     "name": "Tyutor",
     "password": "Parol",
+    "season": "Semestr",
 }
 
 APP_COLS = {
@@ -121,10 +122,19 @@ def list_tutors():
         {
             "name": r.get(TUTOR_COLS["name"], ""),
             "password": r.get(TUTOR_COLS["password"], ""),
+            "season": r.get(TUTOR_COLS["season"], ""),
+            "row": r["_row"],
         }
         for r in _read_tab(TUTORS_TAB)
         if r.get(TUTOR_COLS["name"], "") and r.get(TUTOR_COLS["password"], "")
     ]
+
+
+def set_tutor_season(row, season):
+    ws = _spreadsheet().worksheet(TUTORS_TAB)
+    headers = [h.strip() for h in ws.row_values(1)]
+    ws.update_cell(row, _col_index(headers, TUTOR_COLS["season"]), season)
+    _read_tab.clear()
 
 
 def list_subjects(specialty_code):
