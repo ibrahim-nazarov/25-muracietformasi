@@ -3,6 +3,7 @@ import hmac
 import mimetypes
 import re
 from datetime import datetime
+from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -16,33 +17,128 @@ st.set_page_config(page_title="25% ödəniş müraciəti", page_icon="🎓", lay
 BAKU = ZoneInfo("Asia/Baku")
 MAX_RECEIPT_MB = 10
 MAX_SUBJECTS = 2
+LIVE_REFRESH_SECONDS = 5
 
 STATUS_RECEIVED = "Müraciətiniz qəbul edildi"
 STATUS_REVIEW = "Müraciətinizə baxılır"
 STATUS_APPROVED = "Müraciətiniz təsdiq edildi"
 STATUS_CANCELLED = "Müraciətiniz ləğv edildi"
 STATUSES = [STATUS_RECEIVED, STATUS_REVIEW, STATUS_APPROVED, STATUS_CANCELLED]
+WAITING = (STATUS_RECEIVED, STATUS_REVIEW)
 
-# (fon, yazı) — Sheet-dəki rənglərlə eynidir
-STATUS_STYLE = {
-    STATUS_RECEIVED: ("#e5e7eb", "#111827"),
-    STATUS_REVIEW: ("#fde68a", "#78350f"),
-    STATUS_APPROVED: ("#15803d", "#ffffff"),
-    STATUS_CANCELLED: ("#b91c1c", "#ffffff"),
+STATUS_CLASS = {
+    STATUS_RECEIVED: "pill-received",
+    STATUS_REVIEW: "pill-review",
+    STATUS_APPROVED: "pill-approved",
+    STATUS_CANCELLED: "pill-cancelled",
 }
+
+PROGRESS_STEPS = [STATUS_RECEIVED, STATUS_REVIEW, STATUS_APPROVED]
+PROGRESS_LABELS = ["Qəbul", "Baxılır", "Təsdiq"]
 
 SEASONS = ["Payız", "Yaz"]
 SEASON_NONE = "Seçilməyib"
 
+APP_CSS = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap');
+
+html, body, .stApp { font-family: 'Manrope', 'Segoe UI', Roboto, sans-serif; }
+#MainMenu, footer { visibility: hidden; }
+.block-container { padding-top: 2rem; padding-bottom: 3rem; max-width: 1200px; }
+
+.hero {
+  border-radius: 22px; padding: 28px 32px; color: #ffffff; margin-bottom: 1.25rem;
+  background: linear-gradient(135deg, #4f46e5 0%, #7c3aed 55%, #db2777 100%);
+  box-shadow: 0 18px 40px -14px rgba(79, 70, 229, 0.5);
+}
+.hero .eyebrow { text-transform: uppercase; letter-spacing: .12em; font-size: .72rem; font-weight: 700; opacity: .85; margin-bottom: .45rem; }
+.hero h1 { color: #ffffff; font-size: 1.85rem; font-weight: 800; margin: 0 0 .3rem; letter-spacing: -.01em; }
+.hero p { margin: 0; opacity: .92; font-size: .98rem; }
+
+.stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; margin-bottom: 1.25rem; }
+.stat { border-radius: 16px; padding: 16px 18px; border: 1px solid rgba(127,127,127,.22); background: rgba(127,127,127,.06); }
+.stat .v { font-size: 1.6rem; font-weight: 800; line-height: 1.1; }
+.stat .l { font-size: .82rem; opacity: .7; margin-top: 4px; }
+
+.app-card {
+  border-radius: 18px; padding: 18px 20px; margin-bottom: 14px;
+  border: 1px solid rgba(127,127,127,.22); background: rgba(127,127,127,.05);
+  transition: box-shadow .2s ease, transform .2s ease;
+}
+.app-card:hover { box-shadow: 0 10px 28px -12px rgba(0,0,0,.25); transform: translateY(-1px); }
+.app-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+.app-title { font-weight: 800; font-size: 1.05rem; }
+.app-meta { font-size: .86rem; opacity: .72; margin-top: 3px; }
+.pills { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+
+.pill { display: inline-flex; align-items: center; gap: 6px; padding: 5px 12px; border-radius: 999px; font-size: .8rem; font-weight: 700; white-space: nowrap; }
+.pill-received { background: #e0e7ff; color: #3730a3; }
+.pill-review { background: #fef3c7; color: #92400e; }
+.pill-approved { background: #dcfce7; color: #166534; }
+.pill-cancelled { background: #fee2e2; color: #991b1b; }
+.pill-receipt { background: #ede9fe; color: #5b21b6; }
+
+.steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 14px; }
+.step { height: 6px; border-radius: 999px; background: rgba(127,127,127,.22); }
+.step.on { background: linear-gradient(90deg, #6366f1, #a855f7); }
+.step-labels { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; font-size: .74rem; opacity: .7; margin-top: 6px; }
+
+.cov-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px dashed rgba(127,127,127,.3); }
+
+div[data-testid="stForm"] { border-radius: 18px; border: 1px solid rgba(127,127,127,.22); padding: 1.1rem 1.2rem; }
+div[data-testid="stFormSubmitButton"] button, .stButton > button { border-radius: 12px; font-weight: 700; }
+button[role="tab"] { font-weight: 700 !important; }
+
+@media (max-width: 640px) {
+  .block-container { padding-left: 1rem; padding-right: 1rem; padding-top: 1rem; }
+  .hero { padding: 22px 20px; }
+  .hero h1 { font-size: 1.4rem; }
+}
+</style>
+"""
+
 
 # ---------- Köməkçilər ----------
 
-def status_badge(status):
-    bg, fg = STATUS_STYLE.get(status, ("#e5e7eb", "#111827"))
-    return (
-        f'<span style="background:{bg};color:{fg};padding:4px 12px;'
-        f'border-radius:999px;font-weight:600;white-space:nowrap;">{status}</span>'
+def esc(value):
+    return "" if value is None else escape(str(value))
+
+
+def status_pill(status):
+    cls = STATUS_CLASS.get(status, "pill-received")
+    return f'<span class="pill {cls}">{esc(status)}</span>'
+
+
+def progress_html(status):
+    if status == STATUS_CANCELLED:
+        reached = 0
+    elif status in PROGRESS_STEPS:
+        reached = PROGRESS_STEPS.index(status) + 1
+    else:
+        reached = 1
+    bars = "".join(
+        f'<div class="step{" on" if i < reached else ""}"></div>' for i in range(3)
     )
+    labels = "".join(f"<div>{t}</div>" for t in PROGRESS_LABELS)
+    return f'<div class="steps">{bars}</div><div class="step-labels">{labels}</div>'
+
+
+def hero(eyebrow, title, subtitle=""):
+    sub = f"<p>{esc(subtitle)}</p>" if subtitle else ""
+    st.markdown(
+        f'<div class="hero"><div class="eyebrow">{esc(eyebrow)}</div>'
+        f'<h1>{esc(title)}</h1>{sub}</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def stat_tiles(items):
+    cells = "".join(
+        f'<div class="stat"><div class="v">{esc(v)}</div><div class="l">{esc(label)}</div></div>'
+        for v, label in items
+    )
+    st.markdown(f'<div class="stats">{cells}</div>', unsafe_allow_html=True)
 
 
 def to_number(text):
@@ -103,31 +199,37 @@ def check_tutor_login(password):
 # ---------- Giriş ----------
 
 def login_page():
-    st.title("🎓 25% ödəniş müraciəti")
-    tab_student, tab_tutor = st.tabs(["Tələbə", "Tutor"])
+    hero(
+        "25% ödəniş müraciəti",
+        "Xoş gəlmisiniz",
+        "Tələbələr FIN kodu ilə, tutorlar öz parolu ilə daxil olur.",
+    )
+    _, mid, _ = st.columns([1, 1.3, 1])
+    with mid:
+        tab_student, tab_tutor = st.tabs(["Tələbə", "Tutor"])
 
-    with tab_student:
-        with st.form("student_login"):
-            fin = st.text_input("FIN kod")
-            password = st.text_input("Parol", type="password", help="Parol FIN kodunuzdur.")
-            ok = st.form_submit_button("Daxil ol")
-        if ok:
-            fin_n = fin.strip().upper()
-            if fin_n and password.strip().upper() == fin_n and db.get_student(fin_n):
-                st.session_state.update(role="student", fin=fin_n)
-                st.rerun()
-            st.error("FIN kod və ya parol yanlışdır.")
+        with tab_student:
+            with st.form("student_login"):
+                fin = st.text_input("FIN kod")
+                password = st.text_input("Parol", type="password", help="Parol FIN kodunuzdur.")
+                ok = st.form_submit_button("Daxil ol", type="primary")
+            if ok:
+                fin_n = fin.strip().upper()
+                if fin_n and password.strip().upper() == fin_n and db.get_student(fin_n):
+                    st.session_state.update(role="student", fin=fin_n)
+                    st.rerun()
+                st.error("FIN kod və ya parol yanlışdır.")
 
-    with tab_tutor:
-        with st.form("tutor_login"):
-            password = st.text_input("Tutor parolu", type="password")
-            ok = st.form_submit_button("Daxil ol")
-        if ok:
-            name = check_tutor_login(password)
-            if name:
-                st.session_state.update(role="tutor", tutor_name=name)
-                st.rerun()
-            st.error("Parol yanlışdır.")
+        with tab_tutor:
+            with st.form("tutor_login"):
+                password = st.text_input("Tutor parolu", type="password")
+                ok = st.form_submit_button("Daxil ol", type="primary")
+            if ok:
+                name = check_tutor_login(password)
+                if name:
+                    st.session_state.update(role="tutor", tutor_name=name)
+                    st.rerun()
+                st.error("Parol yanlışdır.")
 
 
 # ---------- Tələbə ----------
@@ -141,11 +243,10 @@ def student_page(fin):
     tutor = find_tutor(student["tutor"])
     season = tutor["season"] if tutor else ""
 
-    st.title(f"Salam, {student['name']}")
-    st.markdown(
-        f"**İxtisas:** {student['specialty']}  \n"
-        f"**Kurs:** {student['course']} · **Qrup:** {student['group']} · "
-        f"**Ödəniş forması:** {student['payment_form']}"
+    hero(
+        "Tələbə paneli",
+        f"Salam, {student['name']}",
+        f"{student['specialty']} · Kurs: {student['course']} · Qrup: {student['group']}",
     )
 
     flash = st.session_state.pop("flash", None)
@@ -196,11 +297,12 @@ def apply_form(student, season):
         s = by_key[k]
         return f"{s['subject']} · {s['semester']} · {s['credits']} kredit"
 
-    st.caption(
-        f"Açıq semestr: {season_label(season)} · "
-        f"Qalan müraciət hüququ: {remaining} fən. "
-        "Ən azı 1 fənn seçməlisiniz, ikinci fənn istəyə bağlıdır."
+    st.markdown(
+        f'<span class="pill pill-receipt">Açıq semestr: {esc(season_label(season))}</span> '
+        f'<span class="pill pill-received">Qalan hüquq: {remaining} fən</span>',
+        unsafe_allow_html=True,
     )
+    st.caption("Ən azı 1 fənn seçməlisiniz. İkinci fənn istəyə bağlıdır.")
 
     with st.form("apply_form"):
         first = st.selectbox(
@@ -293,19 +395,31 @@ def apply_form(student, season):
     st.rerun()
 
 
+def student_app_card(a):
+    return (
+        '<div class="app-card"><div class="app-head"><div>'
+        f'<div class="app-title">{esc(a["subject"])}</div>'
+        f'<div class="app-meta">{esc(a["semester"])} · {esc(a["credits"])} kredit · {esc(a["date"])}</div>'
+        f'</div>{status_pill(a["status"])}</div>'
+        f'{progress_html(a["status"])}</div>'
+    )
+
+
+@st.fragment(run_every=LIVE_REFRESH_SECONDS)
 def my_applications(fin):
+    """Tutor statusu dəyişəndə bu hissə avtomatik yenilənir — səhifəni refresh etmək lazım deyil."""
     apps = db.list_applications(fin=fin)
+    active = [a for a in apps if a["status"] != STATUS_CANCELLED]
+    stat_tiles([
+        (len(active), "Aktiv müraciət"),
+        (max(MAX_SUBJECTS - len(active), 0), "Qalan müraciət hüququ"),
+        (sum(1 for a in apps if a["status"] == STATUS_APPROVED), "Təsdiqlənmiş"),
+    ])
     if not apps:
         st.info("Hələ müraciətiniz yoxdur.")
         return
     for a in reversed(apps):
-        with st.container(border=True):
-            left, right = st.columns([3, 2])
-            left.markdown(
-                f"**{a['subject']}**  \n"
-                f"{a['semester']} · {a['credits']} kredit · {a['date']}"
-            )
-            right.markdown(status_badge(a["status"]), unsafe_allow_html=True)
+        st.markdown(student_app_card(a), unsafe_allow_html=True)
 
 
 # ---------- Tutor ----------
@@ -325,122 +439,82 @@ def season_block(tutor):
         st.success(f"Açıq semestr: {choice}. Dəyişiklik yadda saxlandı.")
 
 
-def tutor_page(tutor_name):
-    tutor = find_tutor(tutor_name)
-
-    st.title("Tutor paneli")
-    st.caption(f"Tutor: {tutor_name}")
-
-    if tutor:
-        season_block(tutor)
-        st.divider()
-
-    status_filter = st.selectbox("Status filtri", ["Hamısı"] + STATUSES)
-
-    # Tələbə üzrə qruplaşdırma: bir tələbənin bütün fənləri bir yerdə görünür
-    groups = {}
-    for a in db.list_applications():
-        if status_filter != "Hamısı" and a["status"] != status_filter:
-            continue
-        student = db.get_student(a["fin"])
-        if not student or student["tutor"] != tutor_name:
-            continue
-        key = a["fin"].upper()
-        group = groups.setdefault(key, {"student": student, "apps": []})
-        group["apps"].append(a)
-
-    if not groups:
-        st.info("Bu filtrə uyğun müraciət yoxdur.")
-        return
-
-    fin_key = st.selectbox(
-        "Tələbə",
-        options=list(groups),
-        format_func=lambda f: (
-            f"{groups[f]['student']['name']} · {len(groups[f]['apps'])} fən"
-        ),
-    )
-    student = groups[fin_key]["student"]
-    apps = groups[fin_key]["apps"]
-
-    left, right = st.columns([1, 1], gap="large")
-    with left:
-        student_header(student)
-        for app in apps:
-            score_form(app)
-    with right:
-        links = []
-        for a in apps:
-            if a["receipt"] and a["receipt"] not in links:
-                links.append(a["receipt"])
-        if not links:
-            st.warning("Qəbz yüklənməyib.")
-        for n, link in enumerate(links, start=1):
-            covered = ", ".join(a["subject"] for a in apps if a["receipt"] == link)
-            receipt_viewer(
-                link,
-                key=f"{fin_key}_{n}",
-                title="Ödənişin qəbzi" if len(links) == 1 else f"Ödənişin qəbzi {n}",
-                note=f"Bu qəbz əhatə edir: {covered}",
-            )
-
-
-def student_header(student):
-    st.subheader(student["name"])
+def student_profile_card(student, count):
     st.markdown(
-        f"**FIN:** {student['fin']}  \n"
-        f"**İxtisas:** {student['specialty']} · **Kurs:** {student['course']} · "
-        f"**Qrup:** {student['group']}  \n"
-        f"**Ödəniş forması:** {student['payment_form']}"
+        '<div class="app-card"><div class="app-head"><div>'
+        f'<div class="app-title">{esc(student["name"])}</div>'
+        f'<div class="app-meta">FIN: {esc(student["fin"])} · {esc(student["specialty"])}</div>'
+        f'<div class="app-meta">Kurs: {esc(student["course"])} · Qrup: {esc(student["group"])} · '
+        f'{esc(student["payment_form"])}</div>'
+        f'</div><span class="pill pill-receipt">{count} müraciət</span></div></div>',
+        unsafe_allow_html=True,
     )
 
 
-def score_form(app):
+def app_header_html(app, receipt_no=None):
+    result_text = esc(app["result"]) or "—"
+    receipt_pill = (
+        f'<span class="pill pill-receipt">🧾 Qəbz {receipt_no}</span>' if receipt_no else ""
+    )
+    return (
+        '<div class="app-card"><div class="app-head"><div>'
+        f'<div class="app-title">{esc(app["subject"])}</div>'
+        f'<div class="app-meta">{esc(app["semester"])} · {esc(app["credits"])} kredit · {esc(app["date"])}</div>'
+        f'<div class="app-meta">Nəticə: <b>{result_text}</b></div>'
+        f'</div><div class="pills">{status_pill(app["status"])}{receipt_pill}</div>'
+        '</div></div>'
+    )
+
+
+def score_form(app, receipt_no=None):
     row = app["row"]
-    with st.container(border=True):
-        st.markdown(
-            f"**{app['subject']}**  \n"
-            f"{app['semester']} · {app['credits']} kredit · müraciət: {app['date']}"
+    st.markdown(app_header_html(app, receipt_no), unsafe_allow_html=True)
+
+    with st.form(f"edit_{row}"):
+        entry_text = st.text_input("Giriş balı", value=app["entry_score"], key=f"entry_{row}")
+        exam_text = st.text_input(
+            "İmtahanda topladığı bal", value=app["exam_score"], key=f"exam_{row}"
         )
-        st.markdown(status_badge(app["status"]), unsafe_allow_html=True)
+        status = st.selectbox(
+            "Müraciətin statusu",
+            STATUSES,
+            index=STATUSES.index(app["status"]) if app["status"] in STATUSES else 0,
+            key=f"status_{row}",
+        )
+        saved = st.form_submit_button("Yadda saxla", type="primary")
 
-        with st.form(f"edit_{row}"):
-            entry_text = st.text_input(
-                "Giriş balı", value=app["entry_score"], key=f"entry_{row}"
-            )
-            exam_text = st.text_input(
-                "İmtahanda topladığı bal", value=app["exam_score"], key=f"exam_{row}"
-            )
-            status = st.selectbox(
-                "Müraciətin statusu",
-                STATUSES,
-                index=STATUSES.index(app["status"]) if app["status"] in STATUSES else 0,
-                key=f"status_{row}",
-            )
-            saved = st.form_submit_button("Yadda saxla", type="primary")
+    if saved:
+        entry, exam = to_number(entry_text), to_number(exam_text)
+        if (entry_text.strip() and entry is None) or (exam_text.strip() and exam is None):
+            st.error("Balları rəqəm kimi yazın (məsələn 72 və ya 72.5).")
+            return
 
-        if saved:
-            entry, exam = to_number(entry_text), to_number(exam_text)
-            if (entry_text.strip() and entry is None) or (exam_text.strip() and exam is None):
-                st.error("Balları rəqəm kimi yazın (məsələn 72 və ya 72.5).")
-                return
+        # Nəticə = Giriş balı + İmtahanda topladığı bal
+        result = fmt_number(entry + exam) if entry is not None and exam is not None else ""
 
-            # Nəticə = Giriş balı + İmtahanda topladığı bal
-            result = fmt_number(entry + exam) if entry is not None and exam is not None else ""
-
-            db.update_application(row, {
-                "entry_score": fmt_number(entry),
-                "exam_score": fmt_number(exam),
-                "result": result,
-                "status": status,
-            })
-            st.success(f"Yadda saxlandı. Nəticə: {result or '—'}")
+        db.update_application(row, {
+            "entry_score": fmt_number(entry),
+            "exam_score": fmt_number(exam),
+            "result": result,
+            "status": status,
+        })
+        st.session_state["flash"] = f"{app['subject']} üzrə məlumat yadda saxlandı. Nəticə: {result or '—'}"
+        st.rerun()
 
 
-def receipt_viewer(link, key, title, note=""):
-    st.subheader(title)
-    if note:
-        st.caption(note)
+def receipt_block(link, n, covered, key):
+    rows = "".join(
+        f'<div class="cov-row"><span>{esc(a["subject"])}</span>{status_pill(a["status"])}</div>'
+        for a in covered
+    )
+    st.markdown(
+        '<div class="app-card"><div class="app-head">'
+        f'<div class="app-title">🧾 Qəbz {n}</div>'
+        f'<span class="pill pill-receipt">{len(covered)} müraciətə aiddir</span>'
+        f'</div>{rows}</div>',
+        unsafe_allow_html=True,
+    )
+
     try:
         data, mime = db.get_receipt(link)
     except Exception:
@@ -460,7 +534,7 @@ def receipt_viewer(link, key, title, note=""):
         b64 = base64.b64encode(data).decode()
         components.html(
             f'<iframe src="data:application/pdf;base64,{b64}#zoom={zoom}" '
-            f'style="width:100%;height:800px;border:none;"></iframe>',
+            f'style="width:100%;height:800px;border:none;border-radius:14px;"></iframe>',
             height=820,
         )
     elif mime.startswith("image/"):
@@ -476,17 +550,91 @@ def receipt_viewer(link, key, title, note=""):
     )
 
 
+def tutor_page(tutor_name):
+    tutor = find_tutor(tutor_name)
+
+    hero("Tutor paneli", tutor_name, "Tələbələrin müraciətləri, balları və qəbzləri")
+
+    flash = st.session_state.pop("flash", None)
+    if flash:
+        st.success(flash)
+
+    if tutor:
+        season_block(tutor)
+
+    mine = []
+    for a in db.list_applications():
+        student = db.get_student(a["fin"])
+        if student and student["tutor"] == tutor_name:
+            mine.append((a, student))
+
+    if not mine:
+        st.info("Sizin tələbələrinizə aid müraciət yoxdur.")
+        return
+
+    stat_tiles([
+        (len({s["fin"] for _, s in mine}), "Tələbə"),
+        (len(mine), "Müraciət"),
+        (sum(1 for a, _ in mine if a["status"] in WAITING), "Baxılmalıdır"),
+        (sum(1 for a, _ in mine if a["status"] == STATUS_APPROVED), "Təsdiqlənmiş"),
+    ])
+
+    status_filter = st.selectbox("Status filtri", ["Hamısı"] + STATUSES)
+
+    # Tələbə üzrə qruplaşdırma: bir tələbənin bütün müraciətləri bir yerdə
+    groups = {}
+    for a, student in mine:
+        if status_filter != "Hamısı" and a["status"] != status_filter:
+            continue
+        group = groups.setdefault(student["fin"].upper(), {"student": student, "apps": []})
+        group["apps"].append(a)
+
+    if not groups:
+        st.info("Bu statusda müraciət yoxdur.")
+        return
+
+    fin_key = st.selectbox(
+        "Tələbə",
+        options=list(groups),
+        format_func=lambda f: f"{groups[f]['student']['name']} · {len(groups[f]['apps'])} müraciət",
+    )
+    student = groups[fin_key]["student"]
+    apps = groups[fin_key]["apps"]
+
+    # Eyni qəbz linki olan müraciətlər eyni nömrəni alır
+    links = []
+    for a in apps:
+        if a["receipt"] and a["receipt"] not in links:
+            links.append(a["receipt"])
+    receipt_no = {link: n for n, link in enumerate(links, start=1)}
+
+    left, right = st.columns([1, 1], gap="large")
+    with left:
+        student_profile_card(student, len(apps))
+        for a in apps:
+            score_form(a, receipt_no.get(a["receipt"]))
+    with right:
+        if not links:
+            st.warning("Qəbz yüklənməyib.")
+        for link in links:
+            n = receipt_no[link]
+            covered = [a for a in apps if a["receipt"] == link]
+            receipt_block(link, n, covered, key=f"{fin_key}_{n}")
+
+
 # ---------- Əsas axın ----------
 
 def main():
+    st.markdown(APP_CSS, unsafe_allow_html=True)
+
     if st.session_state.get("role") is None:
         login_page()
         return
 
-    with st.sidebar:
-        if st.button("Çıxış"):
-            st.session_state.clear()
-            st.rerun()
+    _, out = st.columns([6, 1])
+    if out.button("Çıxış"):
+        st.session_state.clear()
+        st.rerun()
 
     if st.session_state["role"] == "student":
         student_page(st.session_state["fin"])
