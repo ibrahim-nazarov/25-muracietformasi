@@ -20,7 +20,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed"
 )
 
-# Müasir, gözə oxşayan CSS dizayn
 st.markdown("""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
@@ -97,8 +96,14 @@ SCOPES = [
 
 @st.cache_resource
 def get_google_clients():
-    # st.secrets["gcp_service_account"] içindən JSON məlumatlarını oxuyur
     creds_dict = dict(st.secrets["gcp_service_account"])
+    
+    # Private key format xətalarını avtomatik təmizləyir
+    if "private_key" in creds_dict:
+        pk = str(creds_dict["private_key"]).strip()
+        pk = pk.replace("\\n", "\n")
+        creds_dict["private_key"] = pk
+        
     creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
     gc = gspread.authorize(creds)
     drive_service = build("drive", "v3", credentials=creds)
@@ -134,7 +139,6 @@ def load_applications():
 def upload_receipt_to_drive(uploaded_file, student_name, timestamp_str):
     _, drive_service = get_google_clients()
     file_ext = uploaded_file.name.split(".")[-1].lower()
-    # Fayl adı: Tələbənin S.A.A + Saat/Saniyə
     clean_name = re.sub(r'[\\/*?:"<>|]', "", student_name).strip()
     safe_time = timestamp_str.replace(":", "-").replace(" ", "_")
     drive_filename = f"{clean_name}_{safe_time}.{file_ext}"
@@ -156,7 +160,6 @@ def upload_receipt_to_drive(uploaded_file, student_name, timestamp_str):
     ).execute()
     
     file_id = created_file.get("id")
-    # Linklə baxış icazəsi (tyutorun rahat görməsi üçün)
     try:
         drive_service.permissions().create(
             fileId=file_id,
@@ -169,7 +172,6 @@ def upload_receipt_to_drive(uploaded_file, student_name, timestamp_str):
     return created_file.get("webViewLink"), file_id
 
 def get_drive_file_bytes(drive_link):
-    """Drive linkindən fayl ID-ni çıxarıb faylın baytlarını gətirir (Zoom/Preview üçün)"""
     if not drive_link or "drive.google.com" not in str(drive_link):
         return None, None
     match = re.search(r"/d/([a-zA-Z0-9_-]+)", str(drive_link))
@@ -212,7 +214,7 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 if "auth_role" not in st.session_state:
-    st.session_state.auth_role = None  # "student" və ya "tutor"
+    st.session_state.auth_role = None
 if "student_data" not in st.session_state:
     st.session_state.student_data = None
 
@@ -277,7 +279,6 @@ elif st.session_state.auth_role == "student":
             st.session_state.student_data = None
             st.rerun()
 
-    # Tələbənin profil kartı
     st.markdown(f"""
     <div class="info-card">
         <b>FİN kod:</b> {st_info.get('Finkod', '')} &nbsp;|&nbsp;
@@ -293,7 +294,6 @@ elif st.session_state.auth_role == "student":
     with tab_new:
         _, df_curriculum = load_reference_data()
         
-        # İxtisas şifri və ya adına görə fənləri süzürük
         ixtisas_sifr = str(st_info.get("İxtisasın şifri", "")).strip()
         ixtisas_adi = str(st_info.get("İxtisas", "")).strip()
         
@@ -313,7 +313,6 @@ elif st.session_state.auth_role == "student":
                 kredit = subj_row.get("Kredit", 0)
                 semestr = subj_row.get("semestr", "")
                 
-                # Fənn seçilən kimi 25% düsturu görünür
                 st.markdown(f"""
                 <div class="formula-box">
                     <h4 style="margin:0 0 8px 0; color:#1e3a8a;">📐 25% Ödəniş Məbləğinin Hesablanma Düsturu</h4>
@@ -359,25 +358,6 @@ elif st.session_state.auth_role == "student":
                                     
                                     ws_apps, _ = load_applications()
                                     
-                                    # 18 sütunlu dəqiq ardıcıllıq:
-                                    # 1. Müraciət qeydiyyat tarixi:
-                                    # 2. Fin kod
-                                    # 3. Tələbənin S.A.A
-                                    # 4. İxtisas
-                                    # 5. Kurs
-                                    # 6. Qrup
-                                    # 7. Bölmə
-                                    # 8. Ödəniş forması
-                                    # 9. Fənn
-                                    # 10. Semestr
-                                    # 11. Kredit
-                                    # 12. 25%
-                                    # 13. Tarix
-                                    # 14. Giriş balı
-                                    # 15. İmtahanda topladığı bal
-                                    # 16. Nəticə
-                                    # 17. Müraciətin statusu
-                                    # 18. Ödənişin qəbzi
                                     new_row = [
                                         reg_timestamp,
                                         str(st_info.get("Finkod", "")).strip(),
@@ -393,9 +373,9 @@ elif st.session_state.auth_role == "student":
                                         float(amount_25),
                                         exam_date.strftime("%d.%m.%Y"),
                                         float(entry_score),
-                                        "",  # İmtahanda topladığı bal
-                                        "",  # Nəticə
-                                        "Müraciətiniz qəbul edildi",  # Avtomatik ilkin status
+                                        "",
+                                        "",
+                                        "Müraciətiniz qəbul edildi",
                                         receipt_link
                                     ]
                                     ws_apps.append_row(new_row, value_input_option="USER_ENTERED")
@@ -449,7 +429,6 @@ elif st.session_state.auth_role == "tutor":
     if df_apps.empty:
         st.info("Hazırda sistemdə heç bir müraciət yoxdur.")
     else:
-        # Filtrlər
         f_col1, f_col2, f_col3 = st.columns([1.5, 1.5, 1])
         with f_col1:
             status_filter = st.selectbox("Statusa görə süz:", ["Hamısı"] + STATUS_OPTIONS)
@@ -458,7 +437,6 @@ elif st.session_state.auth_role == "tutor":
         with f_col3:
             st.metric("Ümumi Müraciət", len(df_apps))
 
-        # Sətir indeksini qoruyuruq (Google Sheet-də 2-ci sətirdən başlayır)
         df_apps["sheet_row"] = df_apps.index + 2
         filtered_df = df_apps.copy()
         
@@ -475,7 +453,6 @@ elif st.session_state.auth_role == "tutor":
         if filtered_df.empty:
             st.warning("Seçilmiş filtrə uyğun müraciət tapılmadı.")
         else:
-            # Sol tərəf: Müraciət siyahısı və Status dəyişmə | Sağ tərəf: Qəbzin tam görünüşü və Zoom
             left_pane, right_pane = st.columns([1.15, 1.15], gap="large")
             
             with left_pane:
@@ -507,7 +484,6 @@ elif st.session_state.auth_role == "tutor":
                         
                     st.info(f"🕒 **Qeydiyyat vaxtı (saniyə ilə):** {selected_app.get('Müraciət qeydiyyat tarixi:', '')}  |  📅 **Tarix:** {selected_app.get('Tarix', '')}")
 
-                    # Statusu dəyişmə bölməsi
                     current_status = str(selected_app.get("Müraciətin statusu", "")).strip()
                     default_idx = STATUS_OPTIONS.index(current_status) if current_status in STATUS_OPTIONS else 0
                     
@@ -520,7 +496,6 @@ elif st.session_state.auth_role == "tutor":
                     
                     if st.button("💾 Statusu Google Sheet-də Yenilə", type="primary", use_container_width=True):
                         try:
-                            # 'Müraciətin statusu' 17-ci sütundur (Q sütunu)
                             headers = ws_apps.row_values(1)
                             status_col_idx = headers.index("Müraciətin statusu") + 1
                             ws_apps.update_cell(int(selected_app["sheet_row"]), status_col_idx, new_status)
@@ -539,7 +514,6 @@ elif st.session_state.auth_role == "tutor":
                     file_bytes, mime_type = get_drive_file_bytes(receipt_url)
                     
                     if file_bytes and "image" in mime_type:
-                        # Yaxınlaşdırıb-uzaqlaşdırma (Zoom) kontrolu
                         zoom_col1, zoom_col2 = st.columns([3, 1])
                         with zoom_col1:
                             zoom_pct = st.slider("🔍 Qəbzi yaxınlaşdır / uzaqlaşdır (%)", min_value=50, max_value=250, value=100, step=10)
