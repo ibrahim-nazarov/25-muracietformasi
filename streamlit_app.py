@@ -177,28 +177,36 @@ def apply_form(student):
     ext = Path(receipt.name).suffix.lower()
     file_name = f"{safe_filename(student['name'])}_{now:%Y-%m-%d_%H-%M-%S}{ext}"
 
-    db.create_application(
-        {
-            "date": now.strftime("%d.%m.%Y %H:%M:%S"),
-            "fin": student["fin"],
-            "name": student["name"],
-            "specialty": student["specialty"],
-            "course": student["course"],
-            "group": student["group"],
-            "division": student["language"],
-            "payment_form": student["payment_form"],
-            "subject": chosen["subject"],
-            "semester": chosen["semester"],
-            "credits": chosen["credits"],
-            "exam_date": "",
-            "entry_score": "",
-            "exam_score": "",
-            "result": "",
-            "status": STATUS_RECEIVED,
-        },
-        receipt_bytes=receipt.getvalue(),
-        receipt_name=file_name,
-    )
+    record = {
+        "date": now.strftime("%d.%m.%Y %H:%M:%S"),
+        "fin": student["fin"],
+        "name": student["name"],
+        "specialty": student["specialty"],
+        "course": student["course"],
+        "group": student["group"],
+        "division": student["language"],
+        "payment_form": student["payment_form"],
+        "subject": chosen["subject"],
+        "semester": chosen["semester"],
+        "credits": chosen["credits"],
+        "exam_date": "",
+        "entry_score": "",
+        "exam_score": "",
+        "result": "",
+        "status": STATUS_RECEIVED,
+    }
+
+    try:
+        db.create_application(
+            record,
+            receipt_bytes=receipt.getvalue(),
+            receipt_name=file_name,
+        )
+    except Exception as e:
+        st.error("Müraciət saxlanılmadı. Səbəb:")
+        st.code(f"{type(e).__name__}: {str(e)[:800]}")
+        return
+
     st.success("Müraciətiniz qəbul edildi.")
 
 
