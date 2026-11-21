@@ -2,7 +2,7 @@ import base64
 import hmac
 import mimetypes
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -86,6 +86,15 @@ html, body, .stApp { font-family: 'Manrope', 'Segoe UI', Roboto, sans-serif; }
 
 .cov-row { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 9px 0; border-top: 1px dashed rgba(127,127,127,.3); }
 
+.notice { border-radius: 18px; padding: 16px 20px; margin-bottom: 14px; border: 1px solid rgba(127,127,127,.22); }
+.notice-open { background: linear-gradient(135deg, rgba(99,102,241,.12), rgba(219,39,119,.10)); }
+.notice-closed { background: #fee2e2; border-color: #fecaca; color: #7f1d1d; }
+.notice-empty { background: #fef3c7; border-color: #fde68a; color: #78350f; }
+.cd-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 10px; margin-top: 10px; }
+.cd { border-radius: 16px; padding: 14px 8px; text-align: center; background: rgba(127,127,127,.10); border: 1px solid rgba(127,127,127,.2); }
+.cd-v { font-size: 1.9rem; font-weight: 800; line-height: 1; font-variant-numeric: tabular-nums; }
+.cd-l { font-size: .78rem; opacity: .72; margin-top: 6px; }
+
 div[data-testid="stForm"] { border-radius: 18px; border: 1px solid rgba(127,127,127,.22); padding: 1.1rem 1.2rem; }
 div[data-testid="stFormSubmitButton"] button, .stButton > button { border-radius: 12px; font-weight: 700; }
 button[role="tab"] { font-weight: 700 !important; }
@@ -94,6 +103,7 @@ button[role="tab"] { font-weight: 700 !important; }
   .block-container { padding-left: 1rem; padding-right: 1rem; padding-top: 1rem; }
   .hero { padding: 22px 20px; }
   .hero h1 { font-size: 1.4rem; }
+  .cd-v { font-size: 1.4rem; }
 }
 </style>
 """
@@ -103,6 +113,10 @@ button[role="tab"] { font-weight: 700 !important; }
 
 def esc(value):
     return "" if value is None else escape(str(value))
+
+
+def fmt_dt(dt):
+    return dt.strftime("%d.%m.%Y %H:%M") if dt else ""
 
 
 def status_pill(status):
@@ -139,6 +153,30 @@ def stat_tiles(items):
         for v, label in items
     )
     st.markdown(f'<div class="stats">{cells}</div>', unsafe_allow_html=True)
+
+
+def notice_html(title, text, kind="open"):
+    return (
+        f'<div class="notice notice-{kind}"><div class="app-title">{esc(title)}</div>'
+        f'<div class="app-meta">{esc(text)}</div></div>'
+    )
+
+
+def countdown_html(deadline, now):
+    total = int((deadline - now).total_seconds())
+    days, rem = divmod(total, 86400)
+    hours, rem = divmod(rem, 3600)
+    minutes, seconds = divmod(rem, 60)
+    cells = "".join(
+        f'<div class="cd"><div class="cd-v">{v:02d}</div><div class="cd-l">{label}</div></div>'
+        for v, label in [(days, "gün"), (hours, "saat"), (minutes, "dəqiqə"), (seconds, "saniyə")]
+    )
+    return (
+        '<div class="notice notice-open">'
+        '<div class="app-title">Müraciət üçün qalan vaxt</div>'
+        f'<div class="app-meta">Bitmə tarixi: {esc(fmt_dt(deadline))}</div>'
+        f'<div class="cd-grid">{cells}</div></div>'
+    )
 
 
 def to_number(text):
@@ -184,6 +222,10 @@ def find_tutor(name):
         if t["name"] == name:
             return t
     return None
+
+
+def is_deadline_open(tutor):
+    return bool(tutor and tutor["deadline"] and datetime.now(BAKU) < tutor["deadline"])
 
 
 def check_tutor_login(password):
@@ -232,6 +274,42 @@ def login_page():
                 st.error("Parol yanlışdır.")
 
 
+# ---------- Geri sayım ----------
+
+@st.fragment(run_every=1)
+def deadline_panel(tutor_name):
+    """Hər saniyə yenilənən geri sayım. Vaxt bitəndə bütün səhifə yenidən yüklənir."""
+    tutor = find_tutor(tutor_name)
+    deadline = tutor["deadline"] if tutor else None
+    now = datetime.now(BAKU)
+    is_open = deadline is not None and now < deadline
+
+    # Açıq/bağlı vəziyyəti dəyişibsə, forma da dərhal yenilənsin
+    if st.session_state.get("deadline_open") != is_open:
+        st.rerun()
+
+    if deadline is None:
+        st.markdown(
+            notice_html(
+                "Müraciət tarixi təyin edilməyib",
+                "Tutorunuz hələ müraciət bitmə tarixi qoymayıb.",
+                "empty",
+            ),
+            unsafe_allow_html=True,
+        )
+    elif not is_open:
+        st.markdown(
+            notice_html(
+                "Müraciət tarixi bitmişdir",
+                f"Bitmə tarixi: {fmt_dt(deadline)}",
+                "closed",
+            ),
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(countdown_html(deadline, now), unsafe_allow_html=True)
+
+
 # ---------- Tələbə ----------
 
 def student_page(fin):
@@ -241,7 +319,7 @@ def student_page(fin):
         return
 
     tutor = find_tutor(student["tutor"])
-    season = tutor["season"] if tutor else ""
+    st.session_state["deadline_open"] = is_deadline_open(tutor)
 
     hero(
         "Tələbə paneli",
@@ -249,18 +327,29 @@ def student_page(fin):
         f"{student['specialty']} · Kurs: {student['course']} · Qrup: {student['group']}",
     )
 
+    deadline_panel(student["tutor"])
+
     flash = st.session_state.pop("flash", None)
     if flash:
         st.success(flash)
 
     tab_new, tab_mine = st.tabs(["Yeni müraciət", "Müraciətlərim"])
     with tab_new:
-        apply_form(student, season)
+        apply_form(student, tutor)
     with tab_mine:
         my_applications(fin)
 
 
-def apply_form(student, season):
+def apply_form(student, tutor):
+    season = tutor["season"] if tutor else ""
+    deadline = tutor["deadline"] if tutor else None
+
+    if deadline is None:
+        st.info("Tutor hələ müraciət tarixi təyin etməyib. Müraciət hazırda mümkün deyil.")
+        return
+    if datetime.now(BAKU) >= deadline:
+        st.info("Müraciət tarixi bitmişdir.")
+        return
     if season_key(season) == "":
         st.info("Tutorunuz hələ açıq semestr seçməyib. Müraciət hazırda mümkün deyil.")
         return
@@ -299,7 +388,8 @@ def apply_form(student, season):
 
     st.markdown(
         f'<span class="pill pill-receipt">Açıq semestr: {esc(season_label(season))}</span> '
-        f'<span class="pill pill-received">Qalan hüquq: {remaining} fən</span>',
+        f'<span class="pill pill-received">Qalan hüquq: {remaining} fən</span> '
+        f'<span class="pill pill-review">Bitmə: {esc(fmt_dt(deadline))}</span>',
         unsafe_allow_html=True,
     )
     st.caption("Ən azı 1 fənn seçməlisiniz. İkinci fənn istəyə bağlıdır.")
@@ -332,8 +422,11 @@ def apply_form(student, season):
         return
 
     chosen_keys = [k for k in (first, second) if k is not None]
+    now = datetime.now(BAKU)
 
     problems = []
+    if now >= deadline:
+        problems.append("Müraciət tarixi bitmişdir.")
     if first is None:
         problems.append("1-ci fənni seçin.")
     if len(chosen_keys) != len(set(chosen_keys)):
@@ -352,7 +445,6 @@ def apply_form(student, season):
 
     chosen = [by_key[k] for k in chosen_keys]
 
-    now = datetime.now(BAKU)
     ext = Path(receipt.name).suffix.lower()
     file_name = f"{safe_filename(student['name'])}_{now:%Y-%m-%d_%H-%M-%S}{ext}"
     date_text = now.strftime("%d.%m.%Y %H:%M:%S")
@@ -428,15 +520,76 @@ def season_block(tutor):
     current = season_label(tutor["season"])
     options = [SEASON_NONE] + SEASONS
     choice = st.radio(
-        "Açıq semestr (tələbələr yalnız bu semestrin fənlərinə müraciət edə bilər)",
+        "Açıq semestr",
         options,
         index=options.index(current),
         horizontal=True,
         key=f"season_{tutor['row']}",
+        help="Tələbələr yalnız bu semestrin fənlərinə müraciət edə bilər.",
     )
     if choice != current:
         db.set_tutor_season(tutor["row"], "" if choice == SEASON_NONE else choice)
         st.success(f"Açıq semestr: {choice}. Dəyişiklik yadda saxlandı.")
+
+
+def deadline_block(tutor):
+    current = tutor["deadline"]
+    now = datetime.now(BAKU)
+
+    if current is None and tutor["deadline_text"]:
+        pill = '<span class="pill pill-cancelled">Format tanınmadı</span>'
+    elif current is None:
+        pill = '<span class="pill pill-review">Təyin edilməyib</span>'
+    elif now < current:
+        pill = '<span class="pill pill-approved">Açıqdır</span>'
+    else:
+        pill = '<span class="pill pill-cancelled">Bitib</span>'
+
+    st.markdown(
+        '<div class="app-card"><div class="app-head"><div>'
+        '<div class="app-title">Müraciət bitmə tarixi</div>'
+        f'<div class="app-meta">Cari: {esc(fmt_dt(current) or "—")}</div>'
+        '<div class="app-meta">Bu tarixdən sonra tələbələr müraciət edə bilməz</div>'
+        f'</div>{pill}</div></div>',
+        unsafe_allow_html=True,
+    )
+
+    default = current or (now + timedelta(days=7)).replace(hour=18, minute=0, second=0, microsecond=0)
+
+    with st.form(f"deadline_{tutor['row']}"):
+        c1, c2 = st.columns(2)
+        day = c1.date_input("Tarix", value=default.date(), format="DD.MM.YYYY")
+        clock = c2.time_input(
+            "Saat",
+            value=default.time().replace(second=0, microsecond=0),
+            step=60,
+        )
+        save = st.form_submit_button("Yadda saxla", type="primary")
+        clear = st.form_submit_button("Tarixi sil")
+
+    if not (save or clear):
+        return
+
+    if clear:
+        new_dt = None
+    else:
+        new_dt = datetime.combine(day, clock, tzinfo=BAKU)
+        if new_dt <= now:
+            st.error("Tarix indiki vaxtdan sonra olmalıdır.")
+            return
+
+    try:
+        db.set_tutor_deadline(tutor["row"], new_dt)
+    except Exception as e:
+        st.error("Tarix yadda saxlanmadı. Səbəb:")
+        st.code(f"{type(e).__name__}: {str(e)[:500]}")
+        return
+
+    st.session_state["flash"] = (
+        f"Müraciət bitmə tarixi yeniləndi: {fmt_dt(new_dt)}" if new_dt
+        else "Müraciət bitmə tarixi silindi."
+    )
+    st.rerun()
 
 
 def student_profile_card(student, count):
@@ -560,7 +713,12 @@ def tutor_page(tutor_name):
         st.success(flash)
 
     if tutor:
-        season_block(tutor)
+        c1, c2 = st.columns([1, 1], gap="large")
+        with c1:
+            season_block(tutor)
+        with c2:
+            deadline_block(tutor)
+        st.divider()
 
     mine = []
     for a in db.list_applications():
