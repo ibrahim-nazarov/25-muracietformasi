@@ -1,533 +1,376 @@
-import streamlit as st
+import os
+from datetime import datetime
 import pandas as pd
+import streamlit as st
 import gspread
 from google.oauth2.service_account import Credentials
-from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseUpload
-from datetime import datetime
-import pytz
-import io
-import base64
-import re
 
-# ==========================================
-# 1. SƏHİFƏ KONFİQURASİYASI VƏ DİZAYN
-# ==========================================
+# ---------------------------------------------------------
+# 1. SƏHİFƏ KONFİQURASİYASI VƏ YÜNGÜL STİL
+# ---------------------------------------------------------
 st.set_page_config(
-    page_title="BDU - 25% Akademik Borc Müraciət Portalı",
+    page_title="BDU | Sənəd Müraciətləri Portalı",
     page_icon="🎓",
     layout="wide",
-    initial_sidebar_state="collapsed"
+    initial_sidebar_state="expanded",
 )
 
-st.markdown("""
-<style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    
-    html, body, [class*="css"] {
-        font-family: 'Inter', sans-serif;
-    }
-    .main-header {
-        background: linear-gradient(135deg, #1e3a8a 0%, #3b82f6 100%);
-        padding: 1.8rem 2rem;
-        border-radius: 14px;
-        color: white;
-        margin-bottom: 1.5rem;
-        box-shadow: 0 4px 15px rgba(30, 58, 138, 0.15);
-    }
-    .main-header h1 {
-        margin: 0;
-        font-size: 1.75rem;
-        font-weight: 700;
-    }
-    .main-header p {
-        margin: 0.4rem 0 0 0;
-        opacity: 0.9;
-        font-size: 0.95rem;
-    }
-    .info-card {
-        background-color: #f8fafc;
-        border: 1px solid #e2e8f0;
-        border-left: 5px solid #2563eb;
-        padding: 1.2rem;
-        border-radius: 10px;
-        margin-bottom: 1rem;
-    }
-    .formula-box {
-        background: linear-gradient(to right, #eff6ff, #f0fdf4);
-        border: 1px solid #bfdbfe;
-        padding: 1.1rem 1.4rem;
-        border-radius: 10px;
-        margin: 1rem 0;
-    }
+st.markdown(
+    """
+    <style>
+    .block-container { padding-top: 1.5rem; padding-bottom: 2rem; }
     .status-badge {
-        display: inline-block;
-        padding: 5px 14px;
-        border-radius: 20px;
+        padding: 4px 10px;
+        border-radius: 12px;
         font-weight: 600;
         font-size: 0.85rem;
+        display: inline-block;
     }
-    .status-accepted { background-color: #e5e7eb; color: #374151; }
-    .status-reviewing { background-color: #fde68a; color: #92400e; }
-    .status-approved { background-color: #065f46; color: #ffffff; }
-    .status-rejected { background-color: #b91c1c; color: #ffffff; }
-</style>
-""", unsafe_allow_html=True)
-
-# ==========================================
-# 2. SABİTLƏR VƏ GOOGLE API BAĞLANTISI
-# ==========================================
-SPREADSHEET_ID = "1f_YFSuY1L0l7enBz9cQXQ_yXdqZdWgWjPG48OEU2GEc"
-DRIVE_FOLDER_ID = "1NGhi0gWYQQOEalP92IHY51IlA4eg14Cs"
-TUTOR_PASSWORD = "ad234min"
-BAKU_TZ = pytz.timezone("Asia/Baku")
+    .st-wait { background-color: #FEF3C7; color: #92400E; }
+    .st-proc { background-color: #DBEAFE; color: #1E40AF; }
+    .st-ready { background-color: #D1FAE5; color: #065F46; }
+    .st-done { background-color: #E5E7EB; color: #374151; }
+    .st-rej { background-color: #FEE2E2; color: #991B1B; }
+    .card-box {
+        border: 1px solid #E5E7EB;
+        border-radius: 10px;
+        padding: 16px;
+        margin-bottom: 12px;
+        background-color: #FFFFFF;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
 STATUS_OPTIONS = [
-    "Müraciətiniz qəbul edildi",
-    "Müraciətinizə baxılır.",
-    "Müraciətiniz təsdiq edildi",
-    "Müraciətiniz ləğv edildi"
+    "Gözləmədə",
+    "İcradadır",
+    "Hazırdır",
+    "Təhvil verildi",
+    "İmtina edildi",
+    "Ləğv edildi",
 ]
 
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
+REQUIRED_COLUMNS = [
+    "Müraciət ID",
+    "Tarix",
+    "FİN",
+    "Ad Soyad",
+    "Fakültə",
+    "Qrup",
+    "Sənəd növü",
+    "Müraciətin statusu",
+    "İcraçı qeydi",
+    "Təhvil tarixi",
 ]
 
-@st.cache_resource
-def get_google_clients():
-    creds_dict = dict(st.secrets["gcp_service_account"])
-    
-    if "private_key" in creds_dict:
-        pk = str(creds_dict["private_key"]).strip()
-        pk = pk.replace("\\n", "\n")
-        creds_dict["private_key"] = pk
-        
-    creds = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-    gc = gspread.authorize(creds)
-    drive_service = build("drive", "v3", credentials=creds)
-    return gc, drive_service
 
-@st.cache_data(ttl=300)
-def load_reference_data():
-    gc, _ = get_google_clients()
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    
-    ws_students = sh.worksheet("Tələbə bazası")
-    df_students = pd.DataFrame(ws_students.get_all_records())
-    df_students.columns = [c.strip() for c in df_students.columns]
-    
-    ws_curriculum = sh.worksheet("Tədris planı")
-    df_curriculum = pd.DataFrame(ws_curriculum.get_all_records())
-    df_curriculum.columns = [c.strip() for c in df_curriculum.columns]
-    
-    return df_students, df_curriculum
-
-def load_applications():
-    gc, _ = get_google_clients()
-    sh = gc.open_by_key(SPREADSHEET_ID)
-    ws_apps = sh.worksheet("Müraciətlər")
-    records = ws_apps.get_all_records()
-    df_apps = pd.DataFrame(records)
-    if not df_apps.empty:
-        df_apps.columns = [c.strip() for c in df_apps.columns]
-    return ws_apps, df_apps
-
-def upload_receipt_to_drive(uploaded_file, student_name, timestamp_str):
-    _, drive_service = get_google_clients()
-    file_ext = uploaded_file.name.split(".")[-1].lower()
-    clean_name = re.sub(r'[\\/*?:"<>|]', "", student_name).strip()
-    safe_time = timestamp_str.replace(":", "-").replace(" ", "_")
-    drive_filename = f"{clean_name}_{safe_time}.{file_ext}"
-    
-    file_metadata = {
-        "name": drive_filename,
-        "parents": [DRIVE_FOLDER_ID]
+def get_status_badge(status: str) -> str:
+    mapping = {
+        "Gözləmədə": "st-wait",
+        "İcradadır": "st-proc",
+        "Hazırdır": "st-ready",
+        "Təhvil verildi": "st-done",
+        "İmtina edildi": "st-rej",
+        "Ləğv edildi": "st-rej",
     }
-    media = MediaIoBaseUpload(
-        io.BytesIO(uploaded_file.getvalue()),
-        mimetype=uploaded_file.type,
-        resumable=True
-    )
-    created_file = drive_service.files().create(
-        body=file_metadata,
-        media_body=media,
-        fields="id, webViewLink",
-        supportsAllDrives=True
-    ).execute()
-    
-    file_id = created_file.get("id")
-    try:
-        drive_service.permissions().create(
-            fileId=file_id,
-            body={"type": "anyone", "role": "reader"},
-            supportsAllDrives=True
-        ).execute()
-    except Exception:
-        pass
-        
-    return created_file.get("webViewLink"), file_id
+    css_class = mapping.get(status, "st-done")
+    return f'<span class="status-badge {css_class}">{status}</span>'
 
-def get_drive_file_bytes(drive_link):
-    if not drive_link or "drive.google.com" not in str(drive_link):
-        return None, None
-    match = re.search(r"/d/([a-zA-Z0-9_-]+)", str(drive_link))
-    if not match:
-        match = re.search(r"id=([a-zA-Z0-9_-]+)", str(drive_link))
-    if not match:
-        return None, None
-        
-    file_id = match.group(1)
-    _, drive_service = get_google_clients()
-    try:
-        meta = drive_service.files().get(fileId=file_id, fields="mimeType, name", supportsAllDrives=True).execute()
-        content = drive_service.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
-        return content, meta.get("mimeType", "")
-    except Exception:
-        return None, None
 
-def render_status_badge(status):
-    s = str(status).strip()
-    if s == "Müraciətiniz qəbul edildi":
-        cls = "status-accepted"
-    elif s == "Müraciətinizə baxılır.":
-        cls = "status-reviewing"
-    elif s == "Müraciətiniz təsdiq edildi":
-        cls = "status-approved"
-    elif s == "Müraciətiniz ləğv edildi":
-        cls = "status-rejected"
+# ---------------------------------------------------------
+# 2. GOOGLE SHEETS BAĞLANTISI VƏ KEŞLƏMƏ
+# ---------------------------------------------------------
+@st.cache_resource
+def get_worksheet():
+    scopes = [
+        "https://www.googleapis.com/auth/spreadsheets",
+        "https://www.googleapis.com/auth/drive",
+    ]
+    creds_dict = dict(st.secrets["gcp_service_account"])
+    creds = Credentials.from_service_account_info(creds_dict, scopes=scopes)
+    client = gspread.authorize(creds)
+
+    sheet_id = st.secrets["sheets"]["spreadsheet_id"]
+    worksheet_name = st.secrets["sheets"].get("worksheet_name", "Muracietler")
+    spreadsheet = client.open_by_key(sheet_id)
+    return spreadsheet.worksheet(worksheet_name)
+
+
+@st.cache_data(ttl=30)
+def load_requests() -> pd.DataFrame:
+    ws = get_worksheet()
+    records = ws.get_all_records()
+    if not records:
+        return pd.DataFrame(columns=REQUIRED_COLUMNS + ["_sheet_row"])
+
+    df = pd.DataFrame(records)
+    # Google Sheets-də 1-ci sətir başlıqdır, məlumatlar 2-ci sətirdən başlayır
+    df["_sheet_row"] = range(2, len(df) + 2)
+
+    for col in REQUIRED_COLUMNS:
+        if col not in df.columns:
+            df[col] = ""
+
+    df["FİN"] = df["FİN"].astype(str).str.strip().str.upper()
+    return df
+
+
+def append_request(row_data: dict):
+    ws = get_worksheet()
+    headers = ws.row_values(1)
+    new_row = [row_data.get(h, "") for h in headers]
+    ws.append_row(new_row, value_input_option="USER_ENTERED")
+    load_requests.clear()
+
+
+def update_request_row(sheet_row: int, updates: dict):
+    ws = get_worksheet()
+    headers = ws.row_values(1)
+    header_map = {name: idx + 1 for idx, name in enumerate(headers)}
+
+    cells_to_update = []
+    for col_name, new_val in updates.items():
+        if col_name in header_map:
+            cells_to_update.append(
+                gspread.Cell(row=sheet_row, col=header_map[col_name], value=str(new_val))
+            )
+
+    if cells_to_update:
+        ws.update_cells(cells_to_update, value_input_option="USER_ENTERED")
+        load_requests.clear()
+
+
+# ---------------------------------------------------------
+# 3. BAŞLIQ VƏ YAN PANEL (NAVİQASİYA)
+# ---------------------------------------------------------
+header_col1, header_col2 = st.columns([1, 8])
+with header_col1:
+    # Base64 əvəzinə lokal fayl istifadə olunur (əgər varsa)
+    if os.path.exists("assets/bdu_logo.png"):
+        st.image("assets/bdu_logo.png", width=70)
     else:
-        cls = "status-accepted"
-    return f'<span class="status-badge {cls}">{s}</span>'
+        st.markdown("## 🎓")
 
-# ==========================================
-# 3. BAŞLIQ VƏ SESSİYA İDARƏETMƏSİ
-# ==========================================
-st.markdown("""
-<div class="main-header">
-    <h1>🎓 25% Akademik Borc (Təkrar İmtahan) Müraciət Portalı</h1>
-    <p>Tələbə müraciətlərinin elektron qeydiyyatı, qəbz yüklənməsi və tyutor nəzarət sistemi</p>
-</div>
-""", unsafe_allow_html=True)
+with header_col2:
+    st.title("Bakı Dövlət Universiteti")
+    st.caption("Tələbə Sənəd Müraciətlərinin İzlənməsi və İdarəetmə Portalı")
 
-if "auth_role" not in st.session_state:
-    st.session_state.auth_role = None
-if "student_data" not in st.session_state:
-    st.session_state.student_data = None
+st.sidebar.header("Bölmə seçimi")
+role = st.sidebar.radio("İstifadəçi rolu:", ["Tələbə", "Tyutor / İcraçı"])
 
-# ==========================================
-# 4. GİRİŞ EKRANI (TƏLƏBƏ VƏ TYUTOR)
-# ==========================================
-if st.session_state.auth_role is None:
-    col_left, col_center, col_right = st.columns([1, 1.4, 1])
-    with col_center:
-        tab_student, tab_tutor = st.tabs(["👨‍🎓 Tələbə Girişi", "👩‍🏫 Tyutor / Admin Girişi"])
-        
-        with tab_student:
-            st.subheader("Tələbə Kabinetinə Giriş")
-            st.caption("Daxil olmaq üçün həm istifadəçi adı, həm də şifrə bölməsinə **FİN kodunuzu** daxil edin.")
-            with st.form("student_login_form"):
-                fin_input = st.text_input("FİN kod", placeholder="Məs: 6WHSA2B").strip().upper()
-                pass_input = st.text_input("Şifrə (FİN kod)", type="password", placeholder="FİN kodunuzu təkrar yazın").strip().upper()
-                submitted_st = st.form_submit_button("Daxil ol", use_container_width=True, type="primary")
-                
-                if submitted_st:
-                    if not fin_input or not pass_input:
-                        st.error("Zəhmət olmasa FİN kod və şifrəni daxil edin.")
-                    elif fin_input != pass_input:
-                        st.error("FİN kod və şifrə eyni olmalıdır!")
-                    else:
-                        df_students, _ = load_reference_data()
-                        df_students["Finkod_clean"] = df_students["Finkod"].astype(str).str.strip().str.upper()
-                        matched = df_students[df_students["Finkod_clean"] == fin_input]
-                        if matched.empty:
-                            st.error("Bu FİN kod tələbə bazasında tapılmadı. Məlumatları yoxlayın.")
-                        else:
-                            st.session_state.auth_role = "student"
-                            st.session_state.student_data = matched.iloc[0].to_dict()
-                            st.rerun()
+if st.sidebar.button("🔄 Məlumatları yenilə"):
+    load_requests.clear()
+    st.rerun()
 
-        with tab_tutor:
-            st.subheader("Tyutor İdarəetmə Paneli")
-            st.caption("Müraciətləri yoxlamaq, qəbzlərə baxmaq və statusları yeniləmək üçün şifrəni daxil edin.")
-            with st.form("tutor_login_form"):
-                tutor_pass = st.text_input("Tyutor Şifrəsi", type="password")
-                submitted_tut = st.form_submit_button("Panelə daxil ol", use_container_width=True, type="primary")
-                
-                if submitted_tut:
-                    if tutor_pass == TUTOR_PASSWORD:
-                        st.session_state.auth_role = "tutor"
-                        st.rerun()
-                    else:
-                        st.error("Şifrə yanlışdır!")
 
-# ==========================================
-# 5. TƏLƏBƏ KABİNETİ
-# ==========================================
-elif st.session_state.auth_role == "student":
-    st_info = st.session_state.student_data
-    
-    top_col1, top_col2 = st.columns([5, 1])
-    with top_col1:
-        st.markdown(f"### 👋 Xoş gəlmisiniz, **{st_info.get('Tələbənin S.A.A', '')}**")
-    with top_col2:
-        if st.button("🚪 Çıxış", use_container_width=True):
-            st.session_state.auth_role = None
-            st.session_state.student_data = None
-            st.rerun()
+# ---------------------------------------------------------
+# 4. TƏLƏBƏ PANELİ
+# ---------------------------------------------------------
+def render_student_portal(df: pd.DataFrame):
+    tab_track, tab_new = st.tabs(["🔍 Müraciəti izlə", "📝 Yeni müraciət"])
 
-    st.markdown(f"""
-    <div class="info-card">
-        <b>FİN kod:</b> {st_info.get('Finkod', '')} &nbsp;|&nbsp;
-        <b>İxtisas:</b> {st_info.get('İxtisas', '')} ({st_info.get('İxtisasın şifri', '')}) &nbsp;|&nbsp;
-        <b>Kurs / Qrup:</b> {st_info.get('Kurs', '')} / {st_info.get('Akademik qrup', '')} &nbsp;|&nbsp;
-        <b>Bölmə:</b> {st_info.get('Tədris dili', '')} &nbsp;|&nbsp;
-        <b>Ödəniş forması:</b> {st_info.get('Ödəniş forması', '')}
-    </div>
-    """, unsafe_allow_html=True)
+    with tab_track:
+        fin_input = st.text_input(
+            "FİN kodunuzu daxil edin (7 simvol):",
+            max_chars=7,
+            placeholder="Məs: 5ABC123",
+        ).strip().upper()
 
-    tab_new, tab_my = st.tabs(["📝 Yeni 25% Müraciəti", "📋 Mənim Müraciətlərim və Statuslar"])
+        if fin_input:
+            user_df = df[df["FİN"] == fin_input].copy()
+
+            if user_df.empty:
+                st.info("Bu FİN kod üzrə aktiv və ya keçmiş müraciət tapılmadı.")
+            else:
+                st.success(f"Cəmi {len(user_df)} müraciət tapıldı.")
+                for _, row in user_df.iloc[::-1].iterrows():
+                    status = str(row["Müraciətin statusu"]).strip()
+                    with st.container():
+                        st.markdown(
+                            f"""
+                            <div class="card-box">
+                                <div style="display:flex; justify-content:space-between; align-items:center;">
+                                    <strong>#{row['Müraciət ID']} — {row['Sənəd növü']}</strong>
+                                    {get_status_badge(status)}
+                                </div>
+                                <p style="margin:6px 0; color:#4B5563; font-size:0.9rem;">
+                                    <strong>Tarix:</strong> {row['Tarix']} |
+                                    <strong>Fakültə:</strong> {row['Fakültə']} ({row['Qrup']})
+                                </p>
+                                <p style="margin:4px 0; font-size:0.9rem;">
+                                    <strong>İcraçı qeydi:</strong> {row['İcraçı qeydi'] or '—'}
+                                </p>
+                            </div>
+                            """,
+                            unsafe_allow_html=True,
+                        )
+
+                        # Yalnız "Gözləmədə" olan müraciəti tələbə ləğv edə bilər
+                        if status == "Gözləmədə":
+                            if st.button(
+                                "❌ Müraciəti ləğv et",
+                                key=f"cancel_{row['_sheet_row']}",
+                            ):
+                                update_request_row(
+                                    int(row["_sheet_row"]),
+                                    {
+                                        "Müraciətin statusu": "Ləğv edildi",
+                                        "İcraçı qeydi": "Tələbə tərəfindən ləğv edildi",
+                                    },
+                                )
+                                st.warning("Müraciətiniz ləğv edildi.")
+                                st.rerun()
 
     with tab_new:
-        _, df_curriculum = load_reference_data()
-        
-        ixtisas_sifr = str(st_info.get("İxtisasın şifri", "")).strip()
-        ixtisas_adi = str(st_info.get("İxtisas", "")).strip()
-        
-        df_curriculum["Sifr_clean"] = df_curriculum["Şifr"].astype(str).str.strip()
-        filtered_subjects = df_curriculum[df_curriculum["Sifr_clean"] == ixtisas_sifr]
-        if filtered_subjects.empty:
-            filtered_subjects = df_curriculum[df_curriculum["İxtisas"].astype(str).str.strip() == ixtisas_adi]
-            
-        if filtered_subjects.empty:
-            st.warning("İxtisasınıza uyğun tədris planında fənn tapılmadı.")
-        else:
-            subject_names = filtered_subjects["Fənnin adı"].astype(str).unique().tolist()
-            selected_subject = st.selectbox("1️⃣ Akademik borcunuz olan fənni seçin:", ["-- Fənn seçin --"] + subject_names)
-            
-            if selected_subject != "-- Fənn seçin --":
-                subj_row = filtered_subjects[filtered_subjects["Fənnin adı"] == selected_subject].iloc[0]
-                kredit = subj_row.get("Kredit", 0)
-                semestr = subj_row.get("semestr", "")
-                
-                st.markdown(f"""
-                <div class="formula-box">
-                    <h4 style="margin:0 0 8px 0; color:#1e3a8a;">📐 25% Ödəniş Məbləğinin Hesablanma Düsturu</h4>
-                    <p style="margin:0; font-size:1.05rem;">
-                        <b>25% Məbləğ = (İllik təhsil haqqı ÷ 60) × {kredit} (Kredit) × 0.25</b>
-                    </p>
-                    <p style="margin:6px 0 0 0; font-size:0.88rem; color:#475569;">
-                        ℹ️ <b>Seçilmiş fənn məlumatları:</b> Semestr: <b>{semestr}</b> | Kredit sayı: <b>{kredit}</b><br>
-                        ⚠️ <i>Qeyd: Ödəniş edərkən bank/portal komissiya haqqını da nəzərə almağınız xahiş olunur.</i>
-                    </p>
-                </div>
-                """, unsafe_allow_html=True)
+        with st.form("new_request_form", clear_on_submit=True):
+            c1, c2 = st.columns(2)
+            fin = c1.text_input("FİN kod *", max_chars=7).strip().upper()
+            full_name = c2.text_input("Ad, Soyad, Ata adı *").strip()
 
-                with st.form("application_submit_form"):
-                    c1, c2, c3 = st.columns(3)
-                    with c1:
-                        amount_25 = st.number_input("Ödədiyiniz 25% məbləğ (AZN)", min_value=0.0, step=0.5, format="%.2f")
-                    with c2:
-                        exam_date = st.date_input("İmtahan / Müraciət tarixi (Cədvəldəki Tarix sütunu)")
-                    with c3:
-                        entry_score = st.number_input("Giriş balı (0 - 50 arası)", min_value=0.0, max_value=50.0, step=0.5)
-                        
-                    receipt_file = st.file_uploader(
-                        "Ödənişin qəbzini yükləyin (Şəkil və ya PDF)",
-                        type=["png", "jpg", "jpeg", "pdf"]
-                    )
-                    
-                    submit_app = st.form_submit_button("✅ Müraciəti Göndər", type="primary", use_container_width=True)
-                    
-                    if submit_app:
-                        if receipt_file is None:
-                            st.error("Zəhmət olmasa ödənişin qəbzini yükləyin!")
-                        elif amount_25 <= 0:
-                            st.error("Zəhmət olmasa ödədiyiniz 25% məbləği düzgün daxil edin!")
-                        else:
-                            with st.spinner("Qəbz Google Drive-a yüklənir və müraciət qeydə alınır..."):
-                                try:
-                                    now_baku = datetime.now(BAKU_TZ)
-                                    reg_timestamp = now_baku.strftime("%d.%m.%Y %H:%M:%S")
-                                    
-                                    student_saa = str(st_info.get("Tələbənin S.A.A", "")).strip()
-                                    receipt_link, _ = upload_receipt_to_drive(receipt_file, student_saa, reg_timestamp)
-                                    
-                                    ws_apps, _ = load_applications()
-                                    
-                                    new_row = [
-                                        reg_timestamp,
-                                        str(st_info.get("Finkod", "")).strip(),
-                                        student_saa,
-                                        ixtisas_adi,
-                                        str(st_info.get("Kurs", "")).strip(),
-                                        str(st_info.get("Akademik qrup", "")).strip(),
-                                        str(st_info.get("Tədris dili", "")).strip(),
-                                        str(st_info.get("Ödəniş forması", "")).strip(),
-                                        selected_subject,
-                                        str(semestr),
-                                        int(kredit) if str(kredit).isdigit() else kredit,
-                                        float(amount_25),
-                                        exam_date.strftime("%d.%m.%Y"),
-                                        float(entry_score),
-                                        "",
-                                        "",
-                                        "Müraciətiniz qəbul edildi",
-                                        receipt_link
-                                    ]
-                                    ws_apps.append_row(new_row, value_input_option="USER_ENTERED")
-                                    st.success(f"Müraciətiniz uğurla qeydə alındı! (Qeydiyyat vaxtı: {reg_timestamp})")
-                                    st.balloons()
-                                except Exception as e:
-                                    st.error(f"Xəta baş verdi: {e}")
+            c3, c4 = st.columns(2)
+            faculty = c3.text_input("Fakültə *").strip()
+            group = c4.text_input("Qrup nömrəsi *").strip()
 
-    with tab_my:
-        st.subheader("Göndərdiyiniz Müraciətlər")
-        if st.button("🔄 Statusları yenilə"):
-            st.rerun()
-            
-        _, df_apps = load_applications()
-        if df_apps.empty or "Fin kod" not in df_apps.columns:
-            st.info("Hələlik heç bir müraciətiniz yoxdur.")
-        else:
-            my_fin = str(st_info.get("Finkod", "")).strip().upper()
-            my_apps = df_apps[df_apps["Fin kod"].astype(str).str.strip().str.upper() == my_fin]
-            
-            if my_apps.empty:
-                st.info("Sizin adınıza qeydə alınmış müraciət tapılmadı.")
-            else:
-                for idx, row in my_apps.iterrows():
-                    with st.container(border=True):
-                        c_info, c_stat = st.columns([3, 1.5])
-                        with c_info:
-                            st.markdown(f"**Fənn:** {row.get('Fənn', '')} ({row.get('Semestr', '')} | {row.get('Kredit', '')} kredit)")
-                            st.caption(
-                                f"🕒 Qeydiyyat: {row.get('Müraciət qeydiyyat tarixi:', '')} | "
-                                f"💰 Ödəniş (25%): {row.get('25%', '')} AZN | "
-                                f"📊 Giriş balı: {row.get('Giriş balı', '')}"
-                            )
-                        with c_stat:
-                            st.markdown(render_status_badge(row.get("Müraciətin statusu", "Müraciətiniz qəbul edildi")), unsafe_allow_html=True)
-
-# ==========================================
-# 6. TYUTOR İDARƏETMƏ PANELİ
-# ==========================================
-elif st.session_state.auth_role == "tutor":
-    t_col1, t_col2 = st.columns([5, 1])
-    with t_col1:
-        st.markdown("### 👩‍🏫 Tyutor Nəzarət və Təsdiq Paneli")
-    with t_col2:
-        if st.button("🚪 Çıxış", use_container_width=True):
-            st.session_state.auth_role = None
-            st.rerun()
-
-    ws_apps, df_apps = load_applications()
-    
-    if df_apps.empty:
-        st.info("Hazırda sistemdə heç bir müraciət yoxdur.")
-    else:
-        f_col1, f_col2, f_col3 = st.columns([1.5, 1.5, 1])
-        with f_col1:
-            status_filter = st.selectbox("Statusa görə süz:", ["Hamısı"] + STATUS_OPTIONS)
-        with f_col2:
-            search_query = st.text_input("Tələbə S.A.A, FİN kod və ya Fənn axtar:").strip().lower()
-        with f_col3:
-            st.metric("Ümumi Müraciət", len(df_apps))
-
-        df_apps["sheet_row"] = df_apps.index + 2
-        filtered_df = df_apps.copy()
-        
-        if status_filter != "Hamısı":
-            filtered_df = filtered_df[filtered_df["Müraciətin statusu"].astype(str).str.strip() == status_filter]
-        if search_query:
-            mask = (
-                filtered_df["Tələbənin S.A.A"].astype(str).str.lower().str.contains(search_query) |
-                filtered_df["Fin kod"].astype(str).str.lower().str.contains(search_query) |
-                filtered_df["Fənn"].astype(str).str.lower().str.contains(search_query)
+            doc_type = st.selectbox(
+                "Tələb olunan sənəd növü *",
+                [
+                    "Təhsil haqqında arayış",
+                    "Transkript (Qiymət cədvəli)",
+                    "Hərbi komissarlıq üçün arayış",
+                    "Diplom əlavəsi / Dublikat",
+                    "Digər",
+                ],
             )
-            filtered_df = filtered_df[mask]
+            submitted = st.form_submit_button("Müraciəti göndər", type="primary")
 
-        if filtered_df.empty:
-            st.warning("Seçilmiş filtrə uyğun müraciət tapılmadı.")
-        else:
-            left_pane, right_pane = st.columns([1.15, 1.15], gap="large")
-            
-            with left_pane:
-                st.subheader(f"📋 Müraciətlər ({len(filtered_df)})")
-                
-                options_map = {
-                    f"#{row['sheet_row']-1} | {row['Tələbənin S.A.A']} — {row['Fənn']} ({row['Müraciətin statusu']})": row
-                    for _, row in filtered_df.iterrows()
-                }
-                selected_label = st.selectbox("Yoxlamaq üçün müraciəti seçin:", list(options_map.keys()))
-                selected_app = options_map[selected_label]
-                
-                with st.container(border=True):
-                    st.markdown(f"#### 👤 {selected_app.get('Tələbənin S.A.A', '')}")
-                    st.markdown(render_status_badge(selected_app.get("Müraciətin statusu", "")), unsafe_allow_html=True)
-                    st.divider()
-                    
-                    d1, d2 = st.columns(2)
-                    with d1:
-                        st.write(f"**FİN kod:** `{selected_app.get('Fin kod', '')}`")
-                        st.write(f"**İxtisas:** {selected_app.get('İxtisas', '')}")
-                        st.write(f"**Kurs / Qrup:** {selected_app.get('Kurs', '')} / {selected_app.get('Qrup', '')}")
-                        st.write(f"**Ödəniş forması:** {selected_app.get('Ödəniş forması', '')}")
-                    with d2:
-                        st.write(f"**Fənn:** {selected_app.get('Fənn', '')}")
-                        st.write(f"**Semestr / Kredit:** {selected_app.get('Semestr', '')} / {selected_app.get('Kredit', '')}")
-                        st.write(f"**Ödənilən 25%:** `{selected_app.get('25%', '')} AZN`")
-                        st.write(f"**Giriş balı:** {selected_app.get('Giriş balı', '')}")
-                        
-                    st.info(f"🕒 **Qeydiyyat vaxtı (saniyə ilə):** {selected_app.get('Müraciət qeydiyyat tarixi:', '')}  |  📅 **Tarix:** {selected_app.get('Tarix', '')}")
-
-                    current_status = str(selected_app.get("Müraciətin statusu", "")).strip()
-                    default_idx = STATUS_OPTIONS.index(current_status) if current_status in STATUS_OPTIONS else 0
-                    
-                    new_status = st.selectbox(
-                        "Müraciətin yeni statusunu seçin:",
-                        STATUS_OPTIONS,
-                        index=default_idx,
-                        key=f"status_select_{selected_app['sheet_row']}"
-                    )
-                    
-                    if st.button("💾 Statusu Google Sheet-də Yenilə", type="primary", use_container_width=True):
-                        try:
-                            headers = ws_apps.row_values(1)
-                            status_col_idx = headers.index("Müraciətin statusu") + 1
-                            ws_apps.update_cell(int(selected_app["sheet_row"]), status_col_idx, new_status)
-                            st.success(f"Status '{new_status}' olaraq yeniləndi!")
-                            st.rerun()
-                        except Exception as e:
-                            st.error(f"Status yenilənərkən xəta baş verdi: {e}")
-
-            with right_pane:
-                st.subheader("🧾 Ödəniş Qəbzi (Canlı Baxış)")
-                receipt_url = selected_app.get("Ödənişin qəbzi", "")
-                
-                if not receipt_url:
-                    st.warning("Bu müraciət üçün qəbz linki tapılmadı.")
+            if submitted:
+                if len(fin) != 7 or not full_name or not faculty or not group:
+                    st.error("Zəhmət olmasa bütün vacib (*) xanaları düzgün doldurun.")
                 else:
-                    file_bytes, mime_type = get_drive_file_bytes(receipt_url)
-                    
-                    if file_bytes and "image" in mime_type:
-                        zoom_col1, zoom_col2 = st.columns([3, 1])
-                        with zoom_col1:
-                            zoom_pct = st.slider("🔍 Qəbzi yaxınlaşdır / uzaqlaşdır (%)", min_value=50, max_value=250, value=100, step=10)
-                        with zoom_col2:
-                            st.markdown(f"<br>[🔗 Drive-da aç]({receipt_url})", unsafe_allow_html=True)
-                            
-                        b64_img = base64.b64encode(file_bytes).decode()
-                        st.markdown(f"""
-                        <div style="border: 2px solid #cbd5e1; border-radius: 10px; overflow: auto; max-height: 620px; background: #f1f5f9; padding: 10px; text-align: center;">
-                            <img src="data:{mime_type};base64,{b64_img}" style="width: {zoom_pct}%; max-width: none; border-radius: 6px; transition: width 0.15s ease;" />
-                        </div>
-                        """, unsafe_allow_html=True)
-                        
-                    elif file_bytes and "pdf" in mime_type:
-                        st.info("Bu qəbz PDF formatındadır. Aşağıda baxa və ya Drive-da aça bilərsiniz:")
-                        b64_pdf = base64.b64encode(file_bytes).decode()
-                        st.markdown(f'<iframe src="data:application/pdf;base64,{b64_pdf}" width="100%" height="600px" style="border-radius:10px; border:1px solid #cbd5e1;"></iframe>', unsafe_allow_html=True)
-                    else:
-                        st.warning("Qəbz şəkli birbaşa yüklənə bilmədi (Drive icazəsini yoxlayın).")
-                        st.markdown(f"👉 [Qəbzi Google Drive-da açmaq üçün klikləyin]({receipt_url})")
+                    req_id = f"BDU-{datetime.now().strftime('%y%m%d%H%M%S')}"
+                    append_request(
+                        {
+                            "Müraciət ID": req_id,
+                            "Tarix": datetime.now().strftime("%Y-%m-%d %H:%M"),
+                            "FİN": fin,
+                            "Ad Soyad": full_name,
+                            "Fakültə": faculty,
+                            "Qrup": group,
+                            "Sənəd növü": doc_type,
+                            "Müraciətin statusu": "Gözləmədə",
+                            "İcraçı qeydi": "",
+                            "Təhvil tarixi": "",
+                        }
+                    )
+                    st.success(f"Müraciətiniz qeydə alındı! İzləmə kodu: **{req_id}**")
+
+
+# ---------------------------------------------------------
+# 5. TYUTOR / İCRAÇI PANELİ
+# ---------------------------------------------------------
+def render_admin_portal(df: pd.DataFrame):
+    if "admin_authenticated" not in st.session_state:
+        st.session_state.admin_authenticated = False
+
+    if not st.session_state.admin_authenticated:
+        st.subheader("🔐 Tyutor / İcraçı girişi")
+        with st.form("admin_login"):
+            username = st.text_input("İstifadəçi adı")
+            password = st.text_input("Şifrə", type="password")
+            login_btn = st.form_submit_button("Daxil ol", type="primary")
+
+            if login_btn:
+                valid_user = st.secrets["auth"]["admin_user"]
+                valid_pass = st.secrets["auth"]["admin_password"]
+                if username == valid_user and password == valid_pass:
+                    st.session_state.admin_authenticated = True
+                    st.rerun()
+                else:
+                    st.error("İstifadəçi adı və ya şifrə yanlışdır.")
+        return
+
+    if st.sidebar.button("🚪 Çıxış et"):
+        st.session_state.admin_authenticated = False
+        st.rerun()
+
+    # Statistika (KPI)
+    k1, k2, k3, k4 = st.columns(4)
+    k1.metric("Cəmi müraciət", len(df))
+    k2.metric("Gözləmədə", int((df["Müraciətin statusu"] == "Gözləmədə").sum()))
+    k3.metric("İcradadır", int((df["Müraciətin statusu"] == "İcradadır").sum()))
+    k4.metric("Hazırdır", int((df["Müraciətin statusu"] == "Hazırdır").sum()))
+
+    st.divider()
+
+    # Filtrlər
+    f1, f2 = st.columns([2, 2])
+    selected_statuses = f1.multiselect(
+        "Status üzrə filtr:",
+        options=STATUS_OPTIONS,
+        default=["Gözləmədə", "İcradadır", "Hazırdır"],
+    )
+    search_query = f2.text_input("FİN, Ad Soyad və ya Müraciət ID axtar:").strip().upper()
+
+    filtered_df = df.copy()
+    if selected_statuses:
+        filtered_df = filtered_df[filtered_df["Müraciətin statusu"].isin(selected_statuses)]
+    if search_query:
+        mask = (
+            filtered_df["FİN"].str.contains(search_query, na=False)
+            | filtered_df["Ad Soyad"].astype(str).str.upper().str.contains(search_query, na=False)
+            | filtered_df["Müraciət ID"].astype(str).str.upper().str.contains(search_query, na=False)
+        )
+        filtered_df = filtered_df[mask]
+
+    display_cols = [c for c in REQUIRED_COLUMNS if c in filtered_df.columns]
+    st.dataframe(filtered_df[display_cols], hide_index=True)
+
+    # Status yeniləmə bloku
+    st.subheader("✏️ Müraciət statusunu yenilə")
+    if filtered_df.empty:
+        st.info("Yeniləmək üçün uyğun müraciət yoxdur.")
+        return
+
+    options_map = {
+        f"{r['Müraciət ID']} | {r['FİN']} - {r['Ad Soyad']} ({r['Sənəd növü']})": r
+        for _, r in filtered_df.iterrows()
+    }
+    selected_label = st.selectbox("Müraciəti seçin:", list(options_map.keys()))
+    selected_row = options_map[selected_label]
+
+    with st.form("update_status_form"):
+        current_status = str(selected_row["Müraciətin statusu"])
+        default_idx = STATUS_OPTIONS.index(current_status) if current_status in STATUS_OPTIONS else 0
+
+        new_status = st.selectbox("Yeni status:", STATUS_OPTIONS, index=default_idx)
+        executor_note = st.text_input(
+            "İcraçı qeydi:", value=str(selected_row.get("İcraçı qeydi", ""))
+        )
+        save_btn = st.form_submit_button("Yadda saxla", type="primary")
+
+        if save_btn:
+            updates = {
+                "Müraciətin statusu": new_status,
+                "İcraçı qeydi": executor_note,
+            }
+            if new_status == "Təhvil verildi" and not selected_row.get("Təhvil tarixi"):
+                updates["Təhvil tarixi"] = datetime.now().strftime("%Y-%m-%d %H:%M")
+
+            update_request_row(int(selected_row["_sheet_row"]), updates)
+            st.success(f"#{selected_row['Müraciət ID']} nömrəli müraciət yeniləndi.")
+            st.rerun()
+
+
+# ---------------------------------------------------------
+# 6. ƏSAS İCRA AXINI
+# ---------------------------------------------------------
+try:
+    requests_df = load_requests()
+    if role == "Tələbə":
+        render_student_portal(requests_df)
+    else:
+        render_admin_portal(requests_df)
+except Exception as e:
+    st.error(f"Sistem xətası baş verdi: {e}")
