@@ -92,8 +92,8 @@ def _col_index(headers, header):
     return headers.index(header) + 1  # 1-dən başlayır
 
 
-@st.cache_data(ttl=60)
-def _read_tab(tab_name):
+def _read_tab_raw(tab_name):
+    """Cədvəli keşsiz oxuyur — hər çağırışda Sheet-dəki ən son dəyər gəlir."""
     ws = _spreadsheet().worksheet(tab_name)
     values = ws.get_all_values()
     if not values:
@@ -110,9 +110,15 @@ def _read_tab(tab_name):
     return records
 
 
+@st.cache_data(ttl=30)
+def _read_tab(tab_name):
+    """Dəyişməyən cədvəllər (tələbə, plan, tutorlar) 30 saniyə keşdə saxlanılır."""
+    return _read_tab_raw(tab_name)
+
+
 def get_student(fin):
     for r in _read_tab(STUDENTS_TAB):
-        if r.get(STUDENT_COLS["fin"], "").upper() == fin:
+        if r.get(STUDENT_COLS["fin"], "").upper() == fin.upper():
             return {k: r.get(h, "") for k, h in STUDENT_COLS.items()}
     return None
 
@@ -151,12 +157,13 @@ def list_subjects(specialty_code):
 
 
 def list_applications(fin=None):
+    """Müraciətlər həmişə keşsiz oxunur ki, Sheet-dəki dəyişiklik dərhal görünsün."""
     result = []
-    for r in _read_tab(APPLICATIONS_TAB):
+    for r in _read_tab_raw(APPLICATIONS_TAB):
         item = {k: r.get(h, "") for k, h in APP_COLS.items()}
         if not item["fin"]:
             continue  # boş sətirləri ötür
-        if fin is None or item["fin"].upper() == fin:
+        if fin is None or item["fin"].upper() == fin.upper():
             item["row"] = r["_row"]
             result.append(item)
     return result
@@ -178,7 +185,8 @@ def _upload_receipt(data, name):
     return result["link"]
 
 
-def create_application(record, receipt_bytes, receipt_name):
+def create_applications(records, receipt_bytes, receipt_name):
+    """Qəbzi bir dəfə yükləyir, hər fənn üçün Sheet-də ayrı sətir yazır."""
     ws = _spreadsheet().worksheet(APPLICATIONS_TAB)
     headers = [h.strip() for h in ws.row_values(1)]
 
@@ -187,13 +195,15 @@ def create_application(record, receipt_bytes, receipt_name):
         _col_index(headers, header)
 
     link = _upload_receipt(receipt_bytes, receipt_name)
-    record = {**record, "receipt": link}
 
-    row = [""] * len(headers)
-    for key, header in APP_COLS.items():
-        row[_col_index(headers, header) - 1] = str(record.get(key, ""))
-    ws.append_row(row, value_input_option="RAW")
-    _read_tab.clear()
+    rows = []
+    for record in records:
+        record = {**record, "receipt": link}
+        row = [""] * len(headers)
+        for key, header in APP_COLS.items():
+            row[_col_index(headers, header) - 1] = str(record.get(key, ""))
+        rows.append(row)
+    ws.append_rows(rows, value_input_option="RAW")
 
 
 def update_application(row, updates):
@@ -201,17 +211,20 @@ def update_application(row, updates):
     headers = [h.strip() for h in ws.row_values(1)]
     for key, value in updates.items():
         ws.update_cell(row, _col_index(headers, APP_COLS[key]), value)
-    _read_tab.clear()
 
 
-def get_receipt(link):
-    match = re.search(r"/d/([\w-]+)", link)
-    if not match:
-        raise ValueError("Qəbz linki düzgün deyil.")
-    file_id = match.group(1)
+@st.cache_data(ttl=3600, show_spinner=False)
+def _download_receipt(file_id):
     _, drive = _clients()
     meta = drive.files().get(
         fileId=file_id, fields="mimeType", supportsAllDrives=True
     ).execute()
     data = drive.files().get_media(fileId=file_id, supportsAllDrives=True).execute()
     return data, meta["mimeType"]
+
+
+def get_receipt(link):
+    match = re.search(r"/d/([\w-]+)", link)
+    if not match:
+        raise ValueError("Qəbz linki düzgün deyil.")
+    return _download_receipt(match.group(1))
