@@ -30,6 +30,9 @@ STATUS_STYLE = {
     STATUS_CANCELLED: ("#b91c1c", "#ffffff"),
 }
 
+SEASONS = ["Payız", "Yaz"]
+SEASON_NONE = "Seçilməyib"
+
 
 # ---------- Köməkçilər ----------
 
@@ -59,6 +62,31 @@ def fmt_number(value):
 
 def safe_filename(text):
     return re.sub(r'[\\/:*?"<>|]+', "", text).strip()
+
+
+def season_key(text):
+    """'payız-1', 'Payiz', 'yaz-2' kimi yazılışları eyni qrupa salır."""
+    t = (text or "").strip().lower()
+    if t.startswith("pay"):
+        return "payiz"
+    if t.startswith("yaz"):
+        return "yaz"
+    return ""
+
+
+def season_label(value):
+    key = season_key(value)
+    for s in SEASONS:
+        if key and season_key(s) == key:
+            return s
+    return SEASON_NONE
+
+
+def find_tutor(name):
+    for t in db.list_tutors():
+        if t["name"] == name:
+            return t
+    return None
 
 
 def check_tutor_login(password):
@@ -109,6 +137,9 @@ def student_page(fin):
         st.error("Tələbə məlumatı tapılmadı.")
         return
 
+    tutor = find_tutor(student["tutor"])
+    season = tutor["season"] if tutor else ""
+
     st.title(f"Salam, {student['name']}")
     st.markdown(
         f"**İxtisas:** {student['specialty']}  \n"
@@ -118,15 +149,24 @@ def student_page(fin):
 
     tab_new, tab_mine = st.tabs(["Yeni müraciət", "Müraciətlərim"])
     with tab_new:
-        apply_form(student)
+        apply_form(student, season)
     with tab_mine:
         my_applications(fin)
 
 
-def apply_form(student):
-    subjects = db.list_subjects(student["specialty_code"])
+def apply_form(student, season):
+    if season_key(season) == "":
+        st.info("Tutorunuz hələ açıq semestr seçməyib. Müraciət hazırda mümkün deyil.")
+        return
+
+    st.caption(f"Açıq semestr: {season_label(season)}")
+
+    subjects = [
+        s for s in db.list_subjects(student["specialty_code"])
+        if season_key(s["semester"]) == season_key(season)
+    ]
     if not subjects:
-        st.info("Bu ixtisas üçün fənn siyahısı tapılmadı. Komissiya ilə əlaqə saxlayın.")
+        st.info(f"Bu ixtisas üçün {season_label(season)} semestrində fənn tapılmadı.")
         return
 
     idx = st.selectbox(
@@ -228,9 +268,30 @@ def my_applications(fin):
 
 # ---------- Tutor ----------
 
+def season_block(tutor):
+    current = season_label(tutor["season"])
+    options = [SEASON_NONE] + SEASONS
+    choice = st.radio(
+        "Açıq semestr (tələbələr yalnız bu semestrin fənlərinə müraciət edə bilər)",
+        options,
+        index=options.index(current),
+        horizontal=True,
+        key=f"season_{tutor['row']}",
+    )
+    if choice != current:
+        db.set_tutor_season(tutor["row"], "" if choice == SEASON_NONE else choice)
+        st.success(f"Açıq semestr: {choice}. Dəyişiklik yadda saxlandı.")
+
+
 def tutor_page(tutor_name):
+    tutor = find_tutor(tutor_name)
+
     st.title("Tutor paneli")
     st.caption(f"Tutor: {tutor_name}")
+
+    if tutor:
+        season_block(tutor)
+        st.divider()
 
     mine = []
     for a in db.list_applications():
