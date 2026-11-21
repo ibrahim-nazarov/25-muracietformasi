@@ -17,6 +17,7 @@ SCOPES = [
 STUDENTS_TAB = "Tələbə bazası"
 CURRICULUM_TAB = "Tədris planı"
 APPLICATIONS_TAB = "Müraciətlər"
+TUTORS_TAB = "Tutorlar"
 
 # Daxili açar -> Sheet-dəki başlıq (dəqiq eyni olmalıdır)
 STUDENT_COLS = {
@@ -26,6 +27,7 @@ STUDENT_COLS = {
     "specialty_code": "İxtisasın şifri",
     "fin": "Finkod",
     "tutor": "Tyutor",
+    "tutor_email": "Tyutor maili",
     "payment_form": "Ödəniş forması",
     "language": "Tədris dili",
     "course": "Kurs",
@@ -36,6 +38,11 @@ CURRICULUM_COLS = {
     "credits": "Kredit",
     "semester": "semestr",
     "specialty_code": "Şifr",
+}
+
+TUTOR_COLS = {
+    "email": "Tyutor maili",
+    "password_hash": "Parol hash",
 }
 
 APP_COLS = {
@@ -107,6 +114,17 @@ def get_student(fin):
     for r in _read_tab(STUDENTS_TAB):
         if r.get(STUDENT_COLS["fin"], "").upper() == fin:
             return {k: r.get(h, "") for k, h in STUDENT_COLS.items()}
+    return None
+
+
+def get_tutor(email):
+    email = (email or "").strip().lower()
+    for r in _read_tab(TUTORS_TAB):
+        if r.get(TUTOR_COLS["email"], "").strip().lower() == email:
+            return {
+                "email": email,
+                "password_hash": r.get(TUTOR_COLS["password_hash"], "").strip(),
+            }
     return None
 
 
